@@ -37,3 +37,14 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
   header looks compressed/encrypted — not analysed yet.
 - Sony modules bundled in USRDIR (audiocodec, libatrac3plus, mpeg, sascore,
   videocodec): system code, to be replaced by HLE.
+
+## Analysis (`python3 -m recomp.analyze game/tkpsp.elf`)
+- Loaded at 0x08804000 (same as the PSP kernel); entry 0x089F34A8.
+- Relocations follow the kernel loader: HI16 pairs with the *next* LO16 in list
+  order. The list is unsorted and HI/LO pairs of different registers interleave,
+  so analysis targets are paired by register instead.
+- 641,720 instructions, all decoded. FPU 5.2%, VFPU 2.3%.
+- 13,798 functions: 7,310 from .eh_frame, rest from jal targets and code
+  pointers in data (vtables/callbacks). Case labels are filtered out.
+- 397 indirect `jr`: 388 recognised jump tables (sltiu bound + table in .rodata).
+- 2,232 `jalr` (virtual calls / callbacks) → need a runtime address→function map.
