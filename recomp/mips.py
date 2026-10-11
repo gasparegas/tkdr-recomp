@@ -167,3 +167,71 @@ def decode(addr, w):
     if name in ("addi", "addiu", "slti", "sltiu") or (0x20 <= op <= 0x3E):
         i.imm = _sext16(imm)
     return i
+
+
+_V0 = ["vadd", "vsub", "vsbn", None, None, None, None, "vdiv"]
+_V1 = ["vmul", "vdot", "vscl", None, "vhdp", "vcrs", "vdet", None]
+_V3 = ["vcmp", None, "vmin", "vmax", None, "vscmp", "vsge", "vslt"]
+_V4 = ["vmov", "vabs", "vneg", "vidt", "vsat0", "vsat1", "vzero", "vone"] + [None] * 8 + [
+    "vrcp", "vrsq", "vsin", "vcos", "vexp2", "vlog2", "vsqrt", "vasin",
+    "vnrcp", None, "vnsin", None, "vrexp2", None, None, None]
+_V7 = ["vrnds", "vrndi", "vrndf1", "vrndf2"] + [None] * 14 + [
+    "vf2h", "vh2f", None, None, "vsbz", "vlgb",
+    "vuc2ifs", "vc2i", "vus2i", "vs2i", "vi2uc", "vi2c", "vi2us", "vi2s"]
+_V9 = ["vsrt1", "vsrt2", "vbfy1", "vbfy2", "vocp", "vsocp", "vfad", "vavg",
+       "vsrt3", "vsrt4", "vsgn", None, None, None, None, None,
+       "vmfvc", "vmtvc"] + [None] * 7 + ["vt4444", "vt5551", "vt5650", None, None, None, None]
+_V4J = {3: "vcst", 16: "vf2in", 17: "vf2iz", 18: "vf2iu", 19: "vf2id", 20: "vi2f", 21: "vcmov"}
+_V5 = ["vpfxs", "vpfxs", "vpfxt", "vpfxt", "vpfxd", "vpfxd", "viim", "vfim"]
+_VMSET = {0: "vmmov", 3: "vmidt", 6: "vmzero", 7: "vmone"}
+
+
+def vfpu_name(w):
+    """Mnemonic of a VFPU instruction (None if invalid)."""
+    op = w >> 26
+    if op == 0x18:
+        return _V0[(w >> 23) & 7]
+    if op == 0x19:
+        return _V1[(w >> 23) & 7]
+    if op == 0x1B:
+        return _V3[(w >> 23) & 7]
+    if op == 0x34:
+        sub = (w >> 21) & 31
+        if sub == 0:
+            return _V4[(w >> 16) & 31]
+        if sub == 1:
+            return _V7[(w >> 16) & 31]
+        if sub == 2:
+            return _V9[(w >> 16) & 31]
+        if sub >= 24:
+            return "vwbn"
+        return _V4J.get(sub)
+    if op == 0x37:
+        return _V5[(w >> 23) & 7]
+    if op == 0x3C:
+        sub = (w >> 21) & 31
+        if sub < 4:
+            return "vmmul"
+        if sub < 8:
+            return "vtfm2"
+        if sub < 12:
+            return "vtfm3"
+        if sub < 16:
+            return "vtfm4"
+        if sub < 20:
+            return "vmscl"
+        if sub < 24:
+            return "vcrsp/vqmul"
+        if sub == 28:
+            return _VMSET.get((w >> 16) & 15)
+        if sub == 29:
+            return "vrot"
+        return None
+    if op == 0x3F:
+        return {0xFFFF0000: "vnop", 0xFFFF0320: "vsync", 0xFFFF040D: "vflush"}.get(w, "vsync?")
+    return {0x32: "lv.s", 0x36: "lv.q", 0x3A: "sv.s", 0x3E: "sv.q",
+            0x35: "lvl/r.q", 0x3D: "svl/r.q"}.get(op)
+
+
+def vfpu_size(w):
+    return ((w >> 7) & 1) | (((w >> 15) & 1) << 1)  # 0 s, 1 p, 2 t, 3 q

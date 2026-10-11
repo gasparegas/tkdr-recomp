@@ -1,0 +1,106 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include "func_table.h"
+#include "hle/hle.h"
+#include "image_base.h"
+#include "recomp.h"
+
+void hle_init(void);
+void io_init(const char *iso_path, const char *ms_root);
+void frontend_run(void);
+
+uint8_t *g_mem;
+
+static RecompFunc find_func(uint32_t addr) {
+    addr &= 0x1FFFFFFFu;
+    unsigned lo = 0, hi = g_func_count;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (g_funcs[mid].addr < addr) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < g_func_count && g_funcs[lo].addr == addr ? g_funcs[lo].fn : NULL;
+}
+
+void recomp_trap(Ctx *c, uint32_t pc, const char *why) {
+    fprintf(stderr, "TRAP at %08X: %s (ra=%08X sp=%08X)\n", pc, why, c->r[31], c->r[29]);
+    exit(1);
+}
+
+static uint32_t g_trace_ra;  // TRACE_RA=0x...: log indirect calls made from there
+
+void call_indirect(Ctx *c, uint32_t addr) {
+    RecompFunc fn = find_func(addr);
+    if (fn) {
+        uint32_t ra = c->r[31];
+        fn(c);
+        if (g_trace_ra && ra == g_trace_ra)
+            fprintf(stderr, "trace: call %08X from %08X -> v0=%08X f0=%g\n", addr, ra, c->r[2], c->f[0].f);
+        return;
+    }
+    for (unsigned k = 0; k < g_import_count; k++)
+        if (g_imports[k].stub == (addr & 0x1FFFFFFFu)) {
+            hle_call(c, k);
+            return;
+        }
+    recomp_trap(c, addr, "indirect call to unknown address");
+}
+
+static void load_image(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        perror(path);
+        exit(1);
+    }
+    size_t n = fread(host(IMAGE_BASE), 1, IMAGE_SIZE, f);
+    fclose(f);
+    if (n != IMAGE_SIZE) {
+        fprintf(stderr, "%s: short read (%zu of %u bytes)\n", path, n, IMAGE_SIZE);
+        exit(1);
+    }
+}
+
+int main(int argc, char **argv) {
+    g_mem = calloc(1, GUEST_MEM_SIZE);
+    if (argc < 3) {
+        fprintf(stderr, "usage: %s image.bin game.iso\n", argv[0]);
+        return 1;
+    }
+    load_image(argv[1]);
+    io_init(argv[2], "ms0");
+    g_hle_log = getenv("HLE_LOG") != NULL;
+    if (getenv("TRACE_RA")) g_trace_ra = (uint32_t)strtoul(getenv("TRACE_RA"), NULL, 0);
+
+    // user partition: everything after the loaded image up to the end of RAM
+    sysmem_init((IMAGE_BASE + IMAGE_SIZE + 0xFFFF) & ~0xFFFFu, 0x0A000000u);
+    hle_init();
+
+    static Ctx boot;
+    const char *boot_path = "disc0:/PSP_GAME/SYSDIR/EBOOT.BIN";
+    uint32_t argp = 0x08800000u;  // scratch area below the image
+    strcpy((char *)host(argp), boot_path);
+    boot.r[4] = (uint32_t)strlen(boot_path) + 1;  // module_start(args, argp)
+    boot.r[5] = argp;
+    fprintf(stderr, "starting module_start at %08X\n", g_entry);
+    sched_boot(&boot);
+    if (getenv("HEADLESS")) {
+        // WATCH=addr,addr,...: print those words (as hex and float) every second
+        const char *watch = getenv("WATCH");
+        for (;;) {
+            sleep(1);
+            if (!watch) continue;
+            char buf[512];
+            snprintf(buf, sizeof buf, "%s", watch);
+            for (char *t = strtok(buf, ","); t; t = strtok(NULL, ",")) {
+                uint32_t a = (uint32_t)strtoul(t, NULL, 0), v = mem_r32(a);
+                float f;
+                memcpy(&f, &v, 4);
+                fprintf(stderr, "watch %08X = %08X (%g)\n", a, v, f);
+            }
+        }
+    }
+    frontend_run();
+    return 0;
+}

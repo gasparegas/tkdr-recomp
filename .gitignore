@@ -10,3 +10,4 @@ game/
 # macOS / Python
 .DS_Store
 __pycache__/
+build/

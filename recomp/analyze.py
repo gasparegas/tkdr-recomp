@@ -42,8 +42,9 @@ def import_stubs(img):
 class Program:
     def __init__(self, path):
         self.img = img = elf.load(path)
-        text = img.sections[".text"]
-        self.text_start, self.text_end = text.addr, text.addr + text.size
+        # code = .init + .text + .fini (contiguous); import stubs are handled apart
+        fini = img.sections[".fini"]
+        self.text_start, self.text_end = img.sections[".init"].addr, fini.addr + fini.size
         self.insns = {}
         for a in range(self.text_start, self.text_end, 4):
             self.insns[a] = mips.decode(a, img.u32(a))
