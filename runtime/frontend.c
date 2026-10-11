@@ -32,7 +32,7 @@ static uint32_t key_to_button(SDL_Keycode k) {
 }
 
 // Convert the displayed framebuffer to ABGR8888 (byte order R,G,B,A).
-static void scanout(uint32_t *out) {
+void frontend_scanout(uint32_t *out) {
     uint32_t base = g_display.fb_addr, stride = g_display.stride;
     for (int y = 0; y < 272; y++)
         for (int x = 0; x < 480; x++) {
@@ -77,7 +77,7 @@ void frontend_run(void) {
                 if (e.key.keysym.sym == SDLK_ESCAPE) exit(0);
             }
         }
-        scanout(pixels);
+        frontend_scanout(pixels);
         SDL_UpdateTexture(tex, NULL, pixels, 480 * 4);
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);

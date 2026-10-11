@@ -10,6 +10,23 @@
 void hle_init(void);
 void io_init(const char *iso_path, const char *ms_root);
 void frontend_run(void);
+void frontend_scanout(uint32_t *out);
+
+// SHOTS=dir: save the displayed framebuffer as dir/shot_NNN.ppm every second
+static void save_shot(const char *dir, int n) {
+    static uint32_t px[480 * 272];
+    char path[512];
+    snprintf(path, sizeof path, "%s/shot_%03d.ppm", dir, n);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    frontend_scanout(px);
+    fprintf(f, "P6\n480 272\n255\n");
+    for (int i = 0; i < 480 * 272; i++) {
+        uint8_t rgb[3] = {(uint8_t)px[i], (uint8_t)(px[i] >> 8), (uint8_t)(px[i] >> 16)};
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+}
 
 uint8_t *g_mem;
 
@@ -88,8 +105,11 @@ int main(int argc, char **argv) {
     if (getenv("HEADLESS")) {
         // WATCH=addr,addr,...: print those words (as hex and float) every second
         const char *watch = getenv("WATCH");
-        for (;;) {
+        int secs = getenv("RUN_SECONDS") ? atoi(getenv("RUN_SECONDS")) : 0;
+        for (int t = 0;; t++) {
+            if (secs && t >= secs) exit(0);
             sleep(1);
+            if (getenv("SHOTS")) save_shot(getenv("SHOTS"), t);
             if (!watch) continue;
             char buf[512];
             snprintf(buf, sizeof buf, "%s", watch);
