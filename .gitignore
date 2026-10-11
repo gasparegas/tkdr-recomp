@@ -1,0 +1,12 @@
+# Copyrighted game data: never commit
+game/
+*.iso
+*.cso
+*.BIN
+*.PRX
+*.prx
+*.elf
+
+# macOS / Python
+.DS_Store
+__pycache__/
