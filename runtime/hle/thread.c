@@ -80,12 +80,18 @@ static __thread Thread *tls_self;
 static pthread_cond_t g_all_done = PTHREAD_COND_INITIALIZER;
 static uint64_t g_boot_ns;
 
+// TIME_SCALE=n makes guest time run n times faster than real time (testing).
+static double g_time_scale = 1.0;
+
 uint64_t hle_time_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t ns = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
-    if (!g_boot_ns) g_boot_ns = ns;
-    return (ns - g_boot_ns) / 1000u;
+    if (!g_boot_ns) {
+        g_boot_ns = ns;
+        if (getenv("TIME_SCALE")) g_time_scale = atof(getenv("TIME_SCALE"));
+    }
+    return (uint64_t)((double)(ns - g_boot_ns) / 1000.0 * g_time_scale);
 }
 
 #define VBLANK_US 16683u
@@ -215,7 +221,7 @@ static void reschedule(Thread *self) {
         if (wake > now) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            uint64_t ns = (uint64_t)ts.tv_nsec + (wake - now) * 1000u;
+            uint64_t ns = (uint64_t)ts.tv_nsec + (uint64_t)((double)(wake - now) * 1000.0 / g_time_scale);
             ts.tv_sec += (time_t)(ns / 1000000000u);
             ts.tv_nsec = (long)(ns % 1000000000u);
             pthread_cond_timedwait(&self->cv, &g_big, &ts);
@@ -292,6 +298,8 @@ static void exit_current(uint32_t status, int del) {
     pthread_exit(NULL);
 }
 
+static int g_boot_thread_id;
+
 static void *host_thread_main(void *arg) {
     Thread *t = arg;
     pthread_mutex_lock(&g_big);
@@ -299,7 +307,9 @@ static void *host_thread_main(void *arg) {
     while (g_cur != t) pthread_cond_wait(&t->cv, &g_big);
     t->status = ST_RUNNING;
     call_indirect(&t->ctx, t->entry);
-    exit_current(t->ctx.r[2], 0);  // returning from the entry = sceKernelExitThread(v0)
+    // returning from the entry = sceKernelExitThread(v0); the kernel deletes
+    // the module_start thread (and frees its stack) once it returns
+    exit_current(t->ctx.r[2], t->id == g_boot_thread_id);
     return NULL;
 }
 
@@ -344,6 +354,7 @@ void sched_boot(Ctx *boot_ctx) {
     pthread_mutex_lock(&g_big);
     Thread *t = thread_new(0, g_entry, 32, 0x40000, 0);
     strcpy(t->h.name, "module_start");
+    g_boot_thread_id = t->id;
     thread_prepare(t, boot_ctx->r[4], boot_ctx->r[5], boot_ctx->r[28]);
     t->status = ST_RUNNING;
     t->seq = ++g_seq;

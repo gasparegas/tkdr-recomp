@@ -60,7 +60,12 @@ uint32_t sysmem_alloc(uint32_t size, int type, uint32_t addr, uint32_t align) {
         pick = b;  // keep going: we want the highest fit
         at = a;
     }
-    if (!pick) return 0;
+    if (!pick) {
+        fprintf(stderr, "sysmem: cannot allocate %x bytes (type %d); blocks:\n", size, type);
+        for (Block *b = g_blocks; b; b = b->next)
+            fprintf(stderr, "  %08X-%08X %s %s\n", b->addr, b->addr + b->size, b->used ? "used" : "FREE", b->name);
+        return 0;
+    }
     if (at > pick->addr) {
         split(pick, at);
         pick = pick->next;

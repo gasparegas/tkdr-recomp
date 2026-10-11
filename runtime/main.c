@@ -84,6 +84,11 @@ void call_indirect(Ctx *c, uint32_t addr) {
     recomp_trap(c, addr, "indirect call to unknown address");
 }
 
+void recomp_probe(Ctx *c, uint32_t func) {
+    fprintf(stderr, "probe f_%08X a0=%08X a1=%08X a2=%08X a3=%08X ra=%08X sp=%08X\n", func, c->r[4], c->r[5],
+            c->r[6], c->r[7], c->r[31], c->r[29]);
+}
+
 // Diagnostic build (RECOMP_CHECK=1): a function returned with a callee-saved
 // register changed. The stack pointer is checked too.
 void check_saved(Ctx *c, const uint32_t *saved, uint32_t func, uint32_t at) {
@@ -140,7 +145,7 @@ int main(int argc, char **argv) {
     if (getenv("TRACE_RA")) g_trace_ra = (uint32_t)strtoul(getenv("TRACE_RA"), NULL, 0);
 
     // user partition: everything after the loaded image up to the end of RAM
-    sysmem_init((IMAGE_BASE + IMAGE_SIZE + 0xFFFF) & ~0xFFFFu, 0x0A000000u);
+    sysmem_init((IMAGE_BASE + IMAGE_SIZE + 0xFF) & ~0xFFu, 0x0A000000u);
     hle_init();
 
     static Ctx boot;
@@ -157,20 +162,24 @@ int main(int argc, char **argv) {
         int secs = getenv("RUN_SECONDS") ? atoi(getenv("RUN_SECONDS")) : 0;
         // INPUT="120:START,120.3:,125:CROSS,125.3:" sets the held buttons at given times
         const char *input = getenv("INPUT");
-        for (int tick = 0;; tick++) {  // 100 ms ticks
-            usleep(100000);
-            double now = tick / 10.0;
+        int last_sec = -1;
+        for (int tick = 0;; tick++) {  // polls every 10 ms; times are in guest seconds
+            usleep(10000);
+            double now = (double)hle_time_us() / 1e6;
+            static double last_input = -1.0;
             if (input) {
                 char buf[1024];
                 snprintf(buf, sizeof buf, "%s", input);
                 char *sp;
                 for (char *e = strtok_r(buf, ",", &sp); e; e = strtok_r(NULL, ",", &sp)) {
                     double at = atof(e);
-                    if (at > now - 0.05 && at <= now + 0.05) g_buttons = button_mask(strchr(e, ':') + 1);
+                    if (at > last_input && at <= now) g_buttons = button_mask(strchr(e, ':') + 1);
                 }
             }
-            if (tick % 10) continue;
-            int t = tick / 10;
+            last_input = now;
+            int t = (int)now;
+            if (t == last_sec) continue;
+            last_sec = t;
             if (secs && t >= secs) exit(0);
             if (getenv("SHOTS")) save_shot(getenv("SHOTS"), t);
             if (!watch) continue;

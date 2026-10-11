@@ -15,6 +15,8 @@ R = "c->r[{}]".format
 
 # RECOMP_CHECK=1: verify every function preserves $s0-$s7, $sp and $fp
 CHECK_CALLEE_SAVED = os.environ.get("RECOMP_CHECK") == "1"
+# RECOMP_PROBE=addr,addr: log arguments on entry to these functions
+PROBES = {int(a, 16) for a in os.environ.get("RECOMP_PROBE", "").split(",") if a}
 
 
 def S(n):
@@ -231,6 +233,8 @@ class FunctionEmitter:
         labels |= {a for a in p.internal_labels if self.inside(a)}
 
         out.append(f"void {self.fname(self.start)}(Ctx *c) {{")
+        if self.start in PROBES:
+            out.append(f"    recomp_probe(c, {self.start:#010x}u);")
         first = p.insns[self.start]
         self.checked = CHECK_CALLEE_SAVED and first.op == "addiu" and first.rs == 29 and first.rt == 29 and first.imm < 0
         if self.checked:
@@ -298,6 +302,17 @@ class FunctionEmitter:
         return f"{{ int t = {cond(i)}; {ds} if (t) {go} }}"
 
 
+def write_if_changed(path, text):
+    """Keep timestamps of unchanged files so rebuilds stay incremental."""
+    try:
+        if open(path).read() == text:
+            return
+    except OSError:
+        pass
+    with open(path, "w") as fh:
+        fh.write(text)
+
+
 def generate(elf_path, out_dir, per_file=400):
     p = analyze.Program(elf_path)
     p.stub_index = {a: k for k, a in enumerate(sorted(p.stubs))}
@@ -314,8 +329,7 @@ def generate(elf_path, out_dir, per_file=400):
         for start, size in chunk:
             lines += FunctionEmitter(p, start, size, stats).emit()
             lines.append("")
-        with open(os.path.join(out_dir, name), "w") as fh:
-            fh.write("\n".join(lines))
+        write_if_changed(os.path.join(out_dir, name), "\n".join(lines))
         files.append(name)
 
     # address -> function table for indirect calls
