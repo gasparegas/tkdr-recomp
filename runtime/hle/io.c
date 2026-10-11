@@ -357,8 +357,11 @@ void sceIoPollAsync(Ctx *c) { collect(c, 1); }
 
 // ---------------------------------------------------------------- metadata
 
-static void write_stat(uint32_t p, int is_dir, uint64_t size) {
+// st_private[0] holds the start sector of UMD files (games use it to build
+// "sce_lbn" raw paths).
+static void write_stat(uint32_t p, int is_dir, uint64_t size, uint32_t lba) {
     memset(host(p), 0, 0x58);
+    mem_w32(p + 0x40, lba);
     mem_w32(p, is_dir ? 0x11FF : 0x21FF);
     mem_w32(p + 4, is_dir ? 0x10 : 0x20);
     mem_w32(p + 8, (uint32_t)size);
@@ -377,7 +380,7 @@ void sceIoGetstat(Ctx *c) {
     if (dev == DEV_DISC) {
         IsoEntry e;
         if (iso_lookup(p, &e)) { RET(SCE_ERROR_ERRNO_ENOENT); return; }
-        write_stat(ARG(1), e.is_dir, e.size);
+        write_stat(ARG(1), e.is_dir, e.size, e.lba);
         RET(0);
         return;
     }
@@ -385,7 +388,7 @@ void sceIoGetstat(Ctx *c) {
     host_path(hp, sizeof hp, p);
     struct stat st;
     if (dev != DEV_MS || stat(hp, &st)) { RET(SCE_ERROR_ERRNO_ENOENT); return; }
-    write_stat(ARG(1), S_ISDIR(st.st_mode), (uint64_t)st.st_size);
+    write_stat(ARG(1), S_ISDIR(st.st_mode), (uint64_t)st.st_size, 0);
     RET(0);
 }
 
@@ -473,9 +476,10 @@ void sceIoDread(Ctx *c) {
             f->dir_pos += rl;
             uint8_t nl = r[32];
             if (nl == 1 && (r[33] == 0 || r[33] == 1)) continue;  // "." and ".."
-            uint32_t size;
+            uint32_t size, lba;
             memcpy(&size, r + 10, 4);
-            write_stat(ent, (r[25] & 2) != 0, size);
+            memcpy(&lba, r + 2, 4);
+            write_stat(ent, (r[25] & 2) != 0, size, lba);
             char *name = (char *)host(ent + 0x58);
             int k = 0;
             for (; k < nl && r[33 + k] != ';'; k++) name[k] = (char)r[33 + k];
@@ -494,7 +498,7 @@ void sceIoDread(Ctx *c) {
     snprintf(full, sizeof full, "%s/%s", f->host_path, de->d_name);
     struct stat st;
     stat(full, &st);
-    write_stat(ent, S_ISDIR(st.st_mode), (uint64_t)st.st_size);
+    write_stat(ent, S_ISDIR(st.st_mode), (uint64_t)st.st_size, 0);
     snprintf((char *)host(ent + 0x58), 256, "%s", de->d_name);
     RET(1);
 }

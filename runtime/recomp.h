@@ -92,6 +92,7 @@ static inline int fcmp(float a, float b, int cond) {
 }
 
 // Provided by the runtime.
+void check_saved(Ctx *c, const uint32_t *saved, uint32_t func, uint32_t at);
 void call_indirect(Ctx *c, uint32_t addr);
 void hle_call(Ctx *c, uint32_t import_index);
 void vfpu_exec(Ctx *c, uint32_t pc, uint32_t insn);

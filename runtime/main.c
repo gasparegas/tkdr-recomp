@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <execinfo.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include "func_table.h"
@@ -11,6 +13,23 @@ void hle_init(void);
 void io_init(const char *iso_path, const char *ms_root);
 void frontend_run(void);
 void frontend_scanout(uint32_t *out);
+
+extern uint32_t g_buttons;
+
+// "START+CROSS" -> PSP button bits
+static uint32_t button_mask(const char *s) {
+    static const struct { const char *n; uint32_t b; } k[] = {
+        {"SELECT", 0x1}, {"START", 0x8}, {"UP", 0x10}, {"RIGHT", 0x20}, {"DOWN", 0x40}, {"LEFT", 0x80},
+        {"L", 0x100}, {"R", 0x200}, {"TRIANGLE", 0x1000}, {"CIRCLE", 0x2000}, {"CROSS", 0x4000}, {"SQUARE", 0x8000}};
+    uint32_t m = 0;
+    char buf[128];
+    snprintf(buf, sizeof buf, "%s", s);
+    char *sp;
+    for (char *t = strtok_r(buf, "+", &sp); t; t = strtok_r(NULL, "+", &sp))
+        for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++)
+            if (!strcmp(t, k[i].n)) m |= k[i].b;
+    return m;
+}
 
 // SHOTS=dir: save the displayed framebuffer as dir/shot_NNN.ppm every second
 static void save_shot(const char *dir, int n) {
@@ -65,6 +84,31 @@ void call_indirect(Ctx *c, uint32_t addr) {
     recomp_trap(c, addr, "indirect call to unknown address");
 }
 
+// Diagnostic build (RECOMP_CHECK=1): a function returned with a callee-saved
+// register changed. The stack pointer is checked too.
+void check_saved(Ctx *c, const uint32_t *saved, uint32_t func, uint32_t at) {
+    static int reported;
+    for (int k = 0; k < 10; k++) {
+        int reg = k < 8 ? 16 + k : (k == 8 ? 29 : 30);
+        if (c->r[reg] != saved[k] && reported < 20) {
+            reported++;
+            fprintf(stderr, "check: f_%08X (jr at %08X) changed $%d %08X -> %08X\n", func, at, reg, saved[k],
+                    c->r[reg]);
+        }
+    }
+}
+
+static void on_crash(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
+    uintptr_t off = (uintptr_t)si->si_addr - (uintptr_t)g_mem;
+    fprintf(stderr, "\n*** signal %d at host %p (guest offset %08lX)\n", sig, si->si_addr,
+            off < 0x20000000u ? (unsigned long)off : 0xFFFFFFFFul);
+    void *bt[48];
+    int n = backtrace(bt, 48);
+    backtrace_symbols_fd(bt, n, 2);
+    _exit(128 + sig);
+}
+
 static void load_image(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -81,6 +125,11 @@ static void load_image(const char *path) {
 
 int main(int argc, char **argv) {
     g_mem = calloc(1, GUEST_MEM_SIZE);
+    struct sigaction sa = {0};
+    sa.sa_sigaction = on_crash;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
     if (argc < 3) {
         fprintf(stderr, "usage: %s image.bin game.iso\n", argv[0]);
         return 1;
@@ -106,15 +155,29 @@ int main(int argc, char **argv) {
         // WATCH=addr,addr,...: print those words (as hex and float) every second
         const char *watch = getenv("WATCH");
         int secs = getenv("RUN_SECONDS") ? atoi(getenv("RUN_SECONDS")) : 0;
-        for (int t = 0;; t++) {
+        // INPUT="120:START,120.3:,125:CROSS,125.3:" sets the held buttons at given times
+        const char *input = getenv("INPUT");
+        for (int tick = 0;; tick++) {  // 100 ms ticks
+            usleep(100000);
+            double now = tick / 10.0;
+            if (input) {
+                char buf[1024];
+                snprintf(buf, sizeof buf, "%s", input);
+                char *sp;
+                for (char *e = strtok_r(buf, ",", &sp); e; e = strtok_r(NULL, ",", &sp)) {
+                    double at = atof(e);
+                    if (at > now - 0.05 && at <= now + 0.05) g_buttons = button_mask(strchr(e, ':') + 1);
+                }
+            }
+            if (tick % 10) continue;
+            int t = tick / 10;
             if (secs && t >= secs) exit(0);
-            sleep(1);
             if (getenv("SHOTS")) save_shot(getenv("SHOTS"), t);
             if (!watch) continue;
             char buf[512];
             snprintf(buf, sizeof buf, "%s", watch);
-            for (char *t = strtok(buf, ","); t; t = strtok(NULL, ",")) {
-                uint32_t a = (uint32_t)strtoul(t, NULL, 0), v = mem_r32(a);
+            for (char *w = strtok(buf, ","); w; w = strtok(NULL, ",")) {
+                uint32_t a = (uint32_t)strtoul(w, NULL, 0), v = mem_r32(a);
                 float f;
                 memcpy(&f, &v, 4);
                 fprintf(stderr, "watch %08X = %08X (%g)\n", a, v, f);

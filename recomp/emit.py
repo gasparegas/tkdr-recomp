@@ -13,6 +13,9 @@ from . import analyze
 
 R = "c->r[{}]".format
 
+# RECOMP_CHECK=1: verify every function preserves $s0-$s7, $sp and $fp
+CHECK_CALLEE_SAVED = os.environ.get("RECOMP_CHECK") == "1"
+
 
 def S(n):
     return f"(int32_t)c->r[{n}]"
@@ -228,6 +231,11 @@ class FunctionEmitter:
         labels |= {a for a in p.internal_labels if self.inside(a)}
 
         out.append(f"void {self.fname(self.start)}(Ctx *c) {{")
+        first = p.insns[self.start]
+        self.checked = CHECK_CALLEE_SAVED and first.op == "addiu" and first.rs == 29 and first.rt == 29 and first.imm < 0
+        if self.checked:
+            out.append("    uint32_t saved_[10]; for (int k_ = 0; k_ < 8; k_++) saved_[k_] = c->r[16 + k_];"
+                       " saved_[8] = c->r[29]; saved_[9] = c->r[30];")
         k, n = 0, len(insns)
         while k < n:
             i = insns[k]
@@ -263,6 +271,8 @@ class FunctionEmitter:
             return f"{{ {R(31)} = {i.addr + 8:#010x}u; {ds} {self.call(i.target, i.addr + 8)} }}"
         if op == "jr":
             if i.rs == 31:
+                if self.checked:
+                    return (f"{{ {ds} check_saved(c, saved_, {self.start:#010x}u, {i.addr:#010x}u); return; }}")
                 return f"{{ {ds} return; }}"
             t = f"uint32_t t = {R(i.rs)};"
             table = self.p.jump_tables.get(i.addr)
