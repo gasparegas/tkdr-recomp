@@ -111,22 +111,3 @@ void sceAudioGetChannelRestLength(Ctx *c) {
 void sceAudioOutputBlocking(Ctx *c) { output(c, (int)ARG(0), ARG(1), ARG(1), ARG(2), 1); }
 void sceAudioOutputPannedBlocking(Ctx *c) { output(c, (int)ARG(0), ARG(1), ARG(2), ARG(3), 1); }
 void sceAudioOutputPanned(Ctx *c) { output(c, (int)ARG(0), ARG(1), ARG(2), ARG(3), 0); }
-
-// ---------------------------------------------------------------- SAS (stub)
-
-static uint32_t g_sas_grain = 256, g_sas_mode;
-
-void __sceSasInit(Ctx *c) {
-    g_sas_grain = ARG(1);
-    g_sas_mode = ARG(3);
-    RET(0);
-}
-// __sceSasCore(core, out): mix one grain of voices into `out` (stereo s16)
-void __sceSasCore(Ctx *c) {
-    memset(host(ARG(1)), 0, g_sas_grain * 4);
-    RET(0);
-}
-void __sceSasCoreWithMix(Ctx *c) { RET(0); }
-void __sceSasGetEndFlag(Ctx *c) { RET(0xFFFFFFFFu); }  // every voice idle
-void __sceSasGetPauseFlag(Ctx *c) { RET(0); }
-void __sceSasGetEnvelopeHeight(Ctx *c) { RET(0); }

@@ -7,6 +7,21 @@ void __sceSasGetEndFlag(Ctx *c);
 void __sceSasGetEnvelopeHeight(Ctx *c);
 void __sceSasGetPauseFlag(Ctx *c);
 void __sceSasInit(Ctx *c);
+void __sceSasRevEVOL(Ctx *c);
+void __sceSasRevParam(Ctx *c);
+void __sceSasRevType(Ctx *c);
+void __sceSasRevVON(Ctx *c);
+void __sceSasSetADSR(Ctx *c);
+void __sceSasSetADSRmode(Ctx *c);
+void __sceSasSetKeyOff(Ctx *c);
+void __sceSasSetKeyOn(Ctx *c);
+void __sceSasSetNoise(Ctx *c);
+void __sceSasSetPause(Ctx *c);
+void __sceSasSetPitch(Ctx *c);
+void __sceSasSetSL(Ctx *c);
+void __sceSasSetSimpleADSR(Ctx *c);
+void __sceSasSetVoice(Ctx *c);
+void __sceSasSetVolume(Ctx *c);
 void sceAudioChRelease(Ctx *c);
 void sceAudioChReserve(Ctx *c);
 void sceAudioChangeChannelConfig(Ctx *c);
@@ -203,6 +218,21 @@ const HleEntry g_hle_table[] = {
     {"__sceSasGetEnvelopeHeight", __sceSasGetEnvelopeHeight},
     {"__sceSasGetPauseFlag", __sceSasGetPauseFlag},
     {"__sceSasInit", __sceSasInit},
+    {"__sceSasRevEVOL", __sceSasRevEVOL},
+    {"__sceSasRevParam", __sceSasRevParam},
+    {"__sceSasRevType", __sceSasRevType},
+    {"__sceSasRevVON", __sceSasRevVON},
+    {"__sceSasSetADSR", __sceSasSetADSR},
+    {"__sceSasSetADSRmode", __sceSasSetADSRmode},
+    {"__sceSasSetKeyOff", __sceSasSetKeyOff},
+    {"__sceSasSetKeyOn", __sceSasSetKeyOn},
+    {"__sceSasSetNoise", __sceSasSetNoise},
+    {"__sceSasSetPause", __sceSasSetPause},
+    {"__sceSasSetPitch", __sceSasSetPitch},
+    {"__sceSasSetSL", __sceSasSetSL},
+    {"__sceSasSetSimpleADSR", __sceSasSetSimpleADSR},
+    {"__sceSasSetVoice", __sceSasSetVoice},
+    {"__sceSasSetVolume", __sceSasSetVolume},
     {"sceAudioChRelease", sceAudioChRelease},
     {"sceAudioChReserve", sceAudioChReserve},
     {"sceAudioChangeChannelConfig", sceAudioChangeChannelConfig},
@@ -392,4 +422,4 @@ const HleEntry g_hle_table[] = {
     {"sceUtilityUnloadNetModule", sceUtilityUnloadNetModule},
     {"sceWlanGetSwitchState", sceWlanGetSwitchState},
 };
-const unsigned g_hle_table_count = 194;
+const unsigned g_hle_table_count = 209;
