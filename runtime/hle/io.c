@@ -26,31 +26,46 @@ typedef struct {
     int is_dir;
 } IsoEntry;
 
+#ifdef __EMSCRIPTEN__
+// In the browser the ISO is a File held by the main thread (see web/shell.html);
+// reads go through a block cache backed by web_read() in web.c.
+int web_iso_read(uint64_t off, void *buf, size_t n);
+static int iso_read(uint64_t off, void *buf, size_t n) { return web_iso_read(off, buf, n); }
+#else
 static int iso_read(uint64_t off, void *buf, size_t n) {
     if (fseeko(g_iso, (off_t)off, SEEK_SET)) return -1;
     return fread(buf, 1, n, g_iso) == n ? 0 : -1;
 }
+#endif
 
 static IsoEntry g_root;
 
 void io_init(const char *iso_path, const char *ms_root) {
     if (ms_root) g_ms_root = ms_root;
+#ifndef __EMSCRIPTEN__
     g_iso = fopen(iso_path, "rb");
     if (!g_iso) {
         perror(iso_path);
         exit(1);
     }
+#endif
+    mkdir(g_ms_root, 0755);
+}
+
+// The primary volume descriptor is read on first use (in the browser the main
+// thread cannot block on ISO reads, so this must happen on a guest thread).
+static void iso_load_root(void) {
+    if (g_root.lba) return;
     uint8_t pvd[SECTOR];
     iso_read(16 * SECTOR, pvd, sizeof pvd);
     if (memcmp(pvd + 1, "CD001", 5)) {
-        fprintf(stderr, "%s: not an ISO9660 image\n", iso_path);
+        fprintf(stderr, "not an ISO9660 image\n");
         exit(1);
     }
     const uint8_t *root = pvd + 156;
     memcpy(&g_root.lba, root + 2, 4);
     memcpy(&g_root.size, root + 10, 4);
     g_root.is_dir = 1;
-    mkdir(g_ms_root, 0755);
 }
 
 // Find `name` (case-insensitive, ";1" ignored) inside directory `dir`.
@@ -86,6 +101,7 @@ static int iso_find(const IsoEntry *dir, const char *name, size_t len, IsoEntry 
 }
 
 static int iso_lookup(const char *path, IsoEntry *out) {
+    iso_load_root();
     *out = g_root;
     while (*path) {
         while (*path == '/') path++;

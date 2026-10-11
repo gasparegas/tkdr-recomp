@@ -172,7 +172,11 @@ static void *host_thread_main(void *arg);
 static void start_host(Thread *t) {
     pthread_attr_t a;
     pthread_attr_init(&a);
+#ifdef __EMSCRIPTEN__
+    pthread_attr_setstacksize(&a, 1u << 20);  // lives in wasm linear memory
+#else
     pthread_attr_setstacksize(&a, 4u << 20);
+#endif
     t->host_alive = 1;
     t->killed = 0;
     if (pthread_create(&t->host, &a, host_thread_main, t) != 0) {

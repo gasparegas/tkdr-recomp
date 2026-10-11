@@ -1,6 +1,9 @@
 // SDL2 frontend: shows the PSP framebuffer, maps the keyboard to buttons.
 #include <SDL.h>
 #include <stdio.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 #include "gpu/gpu.h"
 #include "hle/hle.h"
@@ -54,19 +57,24 @@ void frontend_scanout(uint32_t *out) {
         }
 }
 
-void frontend_run(void) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
-        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
-        return;
-    }
-    SDL_Window *win = SDL_CreateWindow("tkdr", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 544,
-                                       SDL_WINDOW_RESIZABLE);
-    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
-    SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 480, 272);
-    SDL_RenderSetLogicalSize(ren, 480, 272);
+void audio_pull(int16_t *out, int frames);
+
+static void audio_cb(void *ud, Uint8 *stream, int len) {
+    (void)ud;
+    audio_pull((int16_t *)stream, len / 4);
+}
+
+static SDL_Window *win;
+static SDL_Renderer *ren;
+static SDL_Texture *tex;
+static uint32_t frames, last;
+
+void script_tick(void);
+
+static void frame(void) {
     static uint32_t pixels[480 * 272];
-    uint32_t frames = 0, last = SDL_GetTicks();
-    for (;;) {
+    script_tick();
+    {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) exit(0);
@@ -84,11 +92,46 @@ void frontend_run(void) {
         SDL_RenderPresent(ren);
         frames++;
         if (SDL_GetTicks() - last >= 1000) {
+            extern uint32_t g_frames_presented;
+            static uint32_t last_presented;
             char title[96];
-            snprintf(title, sizeof title, "tkdr - %u fps - %u prims/s", frames, gpu_stat_prims());
+            snprintf(title, sizeof title, "tkdr - game %u fps (display %u) - %u prims/s",
+                     g_frames_presented - last_presented, frames, gpu_stat_prims());
+            last_presented = g_frames_presented;
             SDL_SetWindowTitle(win, title);
             frames = 0;
             last = SDL_GetTicks();
         }
     }
+}
+
+#ifdef __EMSCRIPTEN__
+// Debug hooks callable from the page: present a frame now (works even when
+// requestAnimationFrame is paused) and read the guest frame counter.
+EMSCRIPTEN_KEEPALIVE void web_present(void) { frame(); }
+EMSCRIPTEN_KEEPALIVE double web_time(void) { return (double)hle_time_us() / 1e6; }
+EMSCRIPTEN_KEEPALIVE uint32_t web_frames(void) {
+    extern uint32_t g_frames_presented;
+    return g_frames_presented;
+}
+#endif
+
+void frontend_run(void) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO)) {
+        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        return;
+    }
+    win = SDL_CreateWindow("tkdr", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 544, SDL_WINDOW_RESIZABLE);
+    ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
+    tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 480, 272);
+    SDL_RenderSetLogicalSize(ren, 480, 272);
+    SDL_AudioSpec want = {.freq = 44100, .format = AUDIO_S16SYS, .channels = 2, .samples = 1024, .callback = audio_cb};
+    SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
+    if (dev) SDL_PauseAudioDevice(dev, 0);
+    last = SDL_GetTicks();
+#ifdef __EMSCRIPTEN__
+    emscripten_set_main_loop(frame, 0, 1);
+#else
+    for (;;) frame();
+#endif
 }

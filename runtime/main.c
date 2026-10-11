@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
+#ifndef __EMSCRIPTEN__
 #include <execinfo.h>
+#endif
 #include <signal.h>
 #include <unistd.h>
 
@@ -29,6 +31,30 @@ static uint32_t button_mask(const char *s) {
         for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++)
             if (!strcmp(t, k[i].n)) m |= k[i].b;
     return m;
+}
+
+// INPUT="120:START,120.3:,125:CROSS" sets the held buttons at given guest times.
+// Called from the headless loop and from the frontend's frame callback.
+void script_tick(void) {
+    // apply at most one event per tick so that a press is never swallowed by
+    // its own release when ticks are far apart (e.g. a throttled browser tab)
+    static int next;
+    const char *input = getenv("INPUT");
+    if (!input) return;
+    double now = (double)hle_time_us() / 1e6;
+    char buf[2048];
+    snprintf(buf, sizeof buf, "%s", input);
+    char *sp;
+    int k = 0;
+    for (char *e = strtok_r(buf, ",", &sp); e; e = strtok_r(NULL, ",", &sp), k++) {
+        if (k < next) continue;
+        const char *colon = strchr(e, ':');
+        if (colon && atof(e) <= now) {
+            g_buttons = button_mask(colon + 1);
+            next = k + 1;
+        }
+        return;
+    }
 }
 
 // SHOTS=dir: save the displayed framebuffer as dir/shot_NNN.ppm every second
@@ -103,6 +129,7 @@ void check_saved(Ctx *c, const uint32_t *saved, uint32_t func, uint32_t at) {
     }
 }
 
+#ifndef __EMSCRIPTEN__
 static void on_crash(int sig, siginfo_t *si, void *uc) {
     (void)uc;
     uintptr_t off = (uintptr_t)si->si_addr - (uintptr_t)g_mem;
@@ -113,6 +140,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc) {
     backtrace_symbols_fd(bt, n, 2);
     _exit(128 + sig);
 }
+#endif
 
 static void load_image(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -130,17 +158,26 @@ static void load_image(const char *path) {
 
 int main(int argc, char **argv) {
     g_mem = calloc(1, GUEST_MEM_SIZE);
+#ifndef __EMSCRIPTEN__
     struct sigaction sa = {0};
     sa.sa_sigaction = on_crash;
     sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
+#endif
+#ifdef __EMSCRIPTEN__
+    (void)argc;
+    (void)argv;
+    load_image("image.bin");  // preloaded into the virtual FS; the ISO comes from the page
+    io_init(NULL, "ms0");
+#else
     if (argc < 3) {
         fprintf(stderr, "usage: %s image.bin game.iso\n", argv[0]);
         return 1;
     }
     load_image(argv[1]);
     io_init(argv[2], "ms0");
+#endif
     g_hle_log = getenv("HLE_LOG") != NULL;
     if (getenv("TRACE_RA")) g_trace_ra = (uint32_t)strtoul(getenv("TRACE_RA"), NULL, 0);
 
@@ -161,22 +198,11 @@ int main(int argc, char **argv) {
         const char *watch = getenv("WATCH");
         int secs = getenv("RUN_SECONDS") ? atoi(getenv("RUN_SECONDS")) : 0;
         // INPUT="120:START,120.3:,125:CROSS,125.3:" sets the held buttons at given times
-        const char *input = getenv("INPUT");
         int last_sec = -1;
         for (int tick = 0;; tick++) {  // polls every 10 ms; times are in guest seconds
             usleep(10000);
             double now = (double)hle_time_us() / 1e6;
-            static double last_input = -1.0;
-            if (input) {
-                char buf[1024];
-                snprintf(buf, sizeof buf, "%s", input);
-                char *sp;
-                for (char *e = strtok_r(buf, ",", &sp); e; e = strtok_r(NULL, ",", &sp)) {
-                    double at = atof(e);
-                    if (at > last_input && at <= now) g_buttons = button_mask(strchr(e, ':') + 1);
-                }
-            }
-            last_input = now;
+            script_tick();
             int t = (int)now;
             if (t == last_sec) continue;
             last_sec = t;

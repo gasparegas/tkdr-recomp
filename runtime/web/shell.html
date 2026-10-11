@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tkdr</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0b0d; color: #ddd; font: 15px/1.5 system-ui, sans-serif;
+         display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+  canvas { width: min(960px, 100%); aspect-ratio: 480 / 272; image-rendering: pixelated; background: #000; }
+  #pick { padding: 24px; border: 1px dashed #555; border-radius: 8px; text-align: center; max-width: 520px; }
+  #status { font-family: ui-monospace, monospace; font-size: 13px; color: #9a9a9a; }
+  kbd { background: #222; border: 1px solid #444; border-radius: 4px; padding: 0 5px; }
+</style>
+</head>
+<body>
+<div id="pick">
+  <p>Select your own dump of the game (ULUS-10139 ISO).<br>It is read locally and never uploaded.</p>
+  <input type="file" id="iso" accept=".iso">
+</div>
+<canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+<div id="status">waiting for the ISO…</div>
+<div>Arrows: move · <kbd>Enter</kbd> Start · <kbd>Space</kbd> Select · <kbd>Z</kbd> <kbd>X</kbd> <kbd>C</kbd> <kbd>S</kbd> □ ✕ ○ △ · <kbd>Q</kbd> <kbd>W</kbd> L/R</div>
+<script>
+  var statusEl = document.getElementById('status');
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    print: function (t) { console.log(t); },
+    printErr: function (t) { console.warn(t); statusEl.textContent = t; },
+    setStatus: function (t) { if (t) statusEl.textContent = t; },
+  };
+  // ?iso=URL: read the ISO over HTTP range requests instead (local testing)
+  var isoUrl = new URLSearchParams(location.search).get('iso');
+  if (isoUrl) {
+    Module.isoUrl = isoUrl;
+    Module.preRun = [function () {
+      // pass other query parameters (INPUT, TIME_SCALE, ...) as environment variables
+      new URLSearchParams(location.search).forEach(function (v, k) { if (k !== 'iso') ENV[k] = v; });
+      document.getElementById('pick').style.display = 'none';
+      statusEl.textContent = 'starting from ' + isoUrl + '…';
+    }];
+    Module.onRuntimeInitialized = function () { Module.callMain([]); };
+  }
+  document.getElementById('iso').addEventListener('change', function (e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    Module.isoFile = file;
+    document.getElementById('pick').style.display = 'none';
+    statusEl.textContent = 'starting ' + file.name + ' (' + (file.size / 1048576).toFixed(0) + ' MB)…';
+    Module.canvas.focus();
+    Module.callMain([]);
+  });
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

@@ -11,3 +11,4 @@ game/
 .DS_Store
 __pycache__/
 build/
+.claude/
