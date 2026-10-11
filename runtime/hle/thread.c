@@ -10,11 +10,12 @@
 #include <time.h>
 
 #include "../func_table.h"
+#include "../gpu/gpu.h"
 #include "hle.h"
 
 enum { ST_RUNNING = 1, ST_READY = 2, ST_WAITING = 4, ST_DORMANT = 16, ST_DEAD = 32 };
 enum {
-    W_NONE, W_SLEEP, W_DELAY, W_THREAD_END, W_SEMA, W_EVENT, W_VBLANK, W_IO,
+    W_NONE, W_SLEEP, W_DELAY, W_THREAD_END, W_SEMA, W_EVENT, W_VBLANK, W_IO, W_GPU,
 };
 enum { OBJ_THREAD = 1, OBJ_SEMA, OBJ_EVENT, OBJ_FPL, OBJ_CALLBACK };
 
@@ -79,6 +80,7 @@ static uint64_t g_seq;
 static __thread Thread *tls_self;
 static pthread_cond_t g_all_done = PTHREAD_COND_INITIALIZER;
 static uint64_t g_boot_ns;
+uint64_t g_idle_us;  // time with no runnable guest thread (stats)
 
 // TIME_SCALE=n makes guest time run n times faster than real time (testing).
 static double g_time_scale = 1.0;
@@ -87,11 +89,20 @@ uint64_t hle_time_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t ns = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+    static double until_us;  // TIME_SCALE_UNTIL=seconds: back to real time after that
     if (!g_boot_ns) {
         g_boot_ns = ns;
         if (getenv("TIME_SCALE")) g_time_scale = atof(getenv("TIME_SCALE"));
+        if (getenv("TIME_SCALE_UNTIL")) until_us = atof(getenv("TIME_SCALE_UNTIL")) * 1e6;
     }
-    return (uint64_t)((double)(ns - g_boot_ns) / 1000.0 * g_time_scale);
+    double real_us = (double)(ns - g_boot_ns) / 1000.0, t = real_us * g_time_scale;
+    if (until_us > 0 && t > until_us) {
+        t = until_us + (real_us - until_us / g_time_scale);
+        g_time_scale = 1.0;
+        g_boot_ns = ns - (uint64_t)(t * 1000.0);  // keep the clock continuous
+        until_us = 0;
+    }
+    return (uint64_t)t;
 }
 
 #define VBLANK_US 16683u
@@ -181,8 +192,9 @@ void hle_intr_leave(void) { g_in_intr--; }
 // Give the baton to the best ready thread and block until it comes back.
 // Called with g_big held by `self` (which may be waiting, dormant or dead).
 static void reschedule(Thread *self) {
-    if (g_in_intr && self->status == ST_RUNNING) return;
+    if (g_in_intr) return;
     for (;;) {
+        gpu_run_interrupts(&self->ctx);  // GE finish/signal callbacks
         events_locked();
         Thread *next = pick_next();
         if (next) {
@@ -212,13 +224,16 @@ static void reschedule(Thread *self) {
         FOR_EACH_THREAD(t) {
             if (t->status == ST_WAITING) any = 1;
             if (t->status == ST_WAITING && t->deadline && t->deadline < wake) wake = t->deadline;
+            if (t->status == ST_WAITING && t->wait_type == W_GPU && now + 500 < wake) wake = now + 500;
         }
+        if (gpu_busy(-1) && now + 500 < wake) wake = now + 500;  // poll the GPU thread
         if (!any) {
             fprintf(stderr, "all threads finished or deadlocked\n");
             pthread_cond_broadcast(&g_all_done);
             exit(0);
         }
         if (wake > now) {
+            g_idle_us += wake - now;  // approximate (stats)
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             uint64_t ns = (uint64_t)ts.tv_nsec + (uint64_t)((double)(wake - now) * 1000.0 / g_time_scale);
@@ -236,6 +251,9 @@ static void events_locked(void) {
     if (vb != g_last_vblank) {
         g_last_vblank = vb;
         wake_waiters(W_VBLANK, 0, 0);
+    }
+    FOR_EACH_THREAD(t) {
+        if (t->status == ST_WAITING && t->wait_type == W_GPU && !gpu_busy(t->wait_id)) make_ready(t, 0);
     }
     FOR_EACH_THREAD(t) {
         if (t->status != ST_WAITING || !t->deadline || t->deadline > now) continue;
@@ -524,6 +542,12 @@ void thread_delay(Ctx *c, uint64_t usec, int allow_cb) {
 }
 void sceKernelDelayThread(Ctx *c) { thread_delay(c, ARG(0), 0); }
 void sceKernelDelayThreadCB(Ctx *c) { thread_delay(c, ARG(0), 1); }
+
+void hle_wait_gpu(Ctx *c, int list_id) {
+    int32_t r = c->r[2];
+    wait_on(c, W_GPU, list_id, 0);
+    c->r[2] = (uint32_t)r;
+}
 
 void hle_wait_vblank(Ctx *c, int allow_cb) {
     (void)allow_cb;

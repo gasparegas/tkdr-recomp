@@ -62,12 +62,16 @@ void gpu_set_callbacks(uint32_t signal_fn, uint32_t signal_arg, uint32_t finish_
                        uint32_t finish_arg);
 int32_t gpu_enqueue(Ctx *c, uint32_t list, uint32_t stall, int cbid, uint32_t arg, int head);
 int32_t gpu_update_stall(Ctx *c, int id, uint32_t stall);
-int32_t gpu_sync(Ctx *c);
+int32_t gpu_sync(Ctx *c, int list_id, int mode);
+int gpu_busy(int list_id);
+int gpu_run_interrupts(Ctx *c);
 
 // raster.c
 void gpu_draw_prim(int prim, int count);
 void gpu_block_transfer(void);
 void gpu_load_clut(void);
+void gpu_tex_invalidate(void);
+void raster_flush(void);  // wait for queued primitives  // texture memory may have changed
 uint32_t gpu_stat_prims(void);  // primitives drawn since the last call
 
 // Address of a register-relative pointer: (BASE high byte << 24) | value

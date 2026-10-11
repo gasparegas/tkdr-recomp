@@ -182,6 +182,17 @@ int main(int argc, char **argv) {
             last_sec = t;
             if (secs && t >= secs) exit(0);
             if (getenv("SHOTS")) save_shot(getenv("SHOTS"), t);
+            if (getenv("FPS")) {
+                extern uint32_t g_frames_presented;
+                static uint32_t last_frames;
+                extern uint64_t g_gpu_busy_us, g_idle_us;
+                static uint64_t last_gpu, last_idle;
+                fprintf(stderr, "t=%d fps=%u gpu=%llums idle=%llums\n", t, g_frames_presented - last_frames,
+                        (unsigned long long)(g_gpu_busy_us - last_gpu) / 1000, (unsigned long long)(g_idle_us - last_idle) / 1000);
+                last_gpu = g_gpu_busy_us;
+                last_idle = g_idle_us;
+                last_frames = g_frames_presented;
+            }
             if (!watch) continue;
             char buf[512];
             snprintf(buf, sizeof buf, "%s", watch);

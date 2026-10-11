@@ -12,7 +12,11 @@ DisplayState g_display = {.fb_addr = 0x04000000u, .stride = 512, .format = 3};
 
 void sceDisplaySetMode(Ctx *c) { RET(0); }
 
+uint32_t g_frames_presented;
+
 void sceDisplaySetFrameBuf(Ctx *c) {
+    g_frames_presented++;
+    gpu_tex_invalidate();
     if (ARG(0)) {
         g_display.fb_addr = ARG(0);
         g_display.stride = ARG(1);
@@ -39,8 +43,8 @@ void sceGeSetCallback(Ctx *c) {
 void sceGeListEnQueue(Ctx *c) { RET(gpu_enqueue(c, ARG(0), ARG(1), (int)ARG(2), ARG(3), 0)); }
 void sceGeListEnQueueHead(Ctx *c) { RET(gpu_enqueue(c, ARG(0), ARG(1), (int)ARG(2), ARG(3), 1)); }
 void sceGeListUpdateStallAddr(Ctx *c) { RET(gpu_update_stall(c, (int)ARG(0), ARG(1))); }
-void sceGeListSync(Ctx *c) { RET(gpu_sync(c)); }
-void sceGeDrawSync(Ctx *c) { RET(gpu_sync(c)); }
+void sceGeListSync(Ctx *c) { RET(gpu_sync(c, (int)ARG(0), (int)ARG(1))); }
+void sceGeDrawSync(Ctx *c) { RET(gpu_sync(c, -1, (int)ARG(0))); }
 
 // ---------------------------------------------------------------- controller
 

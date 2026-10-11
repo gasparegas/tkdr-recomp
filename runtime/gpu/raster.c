@@ -5,8 +5,10 @@
 // texture + texture function -> alpha test -> depth test -> blend -> masks.
 // Not yet: lighting, fog, stencil, logic ops, dithering, splines.
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "gpu.h"
 
@@ -278,6 +280,7 @@ static void fb_write(const Target *t, int x, int y, uint32_t c, uint32_t mask) {
 // ---------------------------------------------------------------- textures
 
 typedef struct {
+    const uint32_t *pix;  // decoded RGBA8888 texels (texture cache)
     int enabled, fmt, swizzle, w, h, stride, clamp_u, clamp_v, linear, func, rgba, dbl;
     uint32_t addr;
     float env[3];
@@ -394,11 +397,86 @@ static int wrap(int c, int size, int clamp) {
     return c & (size - 1);
 }
 
+// ---------------------------------------------------------------- texture cache
+// Decoded textures are kept across frames. When something may have written
+// texture memory (TEXFLUSH, block transfers, a new frame) the generation
+// changes and entries are re-validated by hashing their source bytes.
+
+#define TEX_CACHE 512
+typedef struct {
+    uint32_t addr, key_fmt, key_size, key_clut, clut_hash, gen;
+    uint64_t data_hash;
+    uint32_t *pix;
+    int w, h;
+} TexEntry;
+static TexEntry g_tex_cache[TEX_CACHE];
+static uint32_t g_tex_gen = 1;
+
+void gpu_tex_invalidate(void) { g_tex_gen++; }
+
+static uint64_t hash_bytes(const uint8_t *p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t v;
+        memcpy(&v, p + i, 8);
+        h = (h ^ v) * 1099511628211ull;
+        h ^= h >> 29;
+    }
+    for (; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
+static uint32_t tex_bytes(const TexState *t) {
+    static const int bpp[16] = {16, 16, 16, 32, 4, 8, 16, 32, 4, 8, 8, 0, 0, 0, 0, 0};
+    uint32_t rows = (uint32_t)t->h, stride = (uint32_t)(t->stride < t->w ? t->w : t->stride);
+    if (t->fmt >= 8) rows = (rows + 3) / 4 * 4;
+    return rows * stride * (uint32_t)bpp[t->fmt] / 8;
+}
+
+void raster_flush(void);
+
+static void tex_cache_lookup(TexState *t) {
+    uint32_t key_fmt = (uint32_t)t->fmt | (uint32_t)t->swizzle << 8 | (uint32_t)t->stride << 16;
+    uint32_t key_size = (uint32_t)t->w | (uint32_t)t->h << 16;
+    uint32_t key_clut = (uint32_t)t->clut_fmt | (uint32_t)t->clut_shift << 4 | (uint32_t)t->clut_mask << 12 |
+                        (uint32_t)t->clut_off << 20;
+    uint32_t clut_hash = 0;
+    if (t->fmt >= 4 && t->fmt <= 7) clut_hash = (uint32_t)hash_bytes((const uint8_t *)g_ge.clut, sizeof g_ge.clut);
+    uint32_t slot = (t->addr * 2654435761u ^ key_fmt ^ key_size * 31u) % TEX_CACHE;
+    TexEntry *e = &g_tex_cache[slot];
+    int same_key = e->pix && e->addr == t->addr && e->key_fmt == key_fmt && e->key_size == key_size &&
+                   e->key_clut == key_clut && e->clut_hash == clut_hash;
+    if (same_key && e->gen == g_tex_gen) {
+        t->pix = e->pix;
+        return;
+    }
+    raster_flush();  // the source may be a render target still being drawn
+    uint32_t n = tex_bytes(t);
+    uint64_t h = (t->addr & 0x1FFFFFFF) + n <= GUEST_MEM_SIZE ? hash_bytes(host(t->addr), n) : 0;
+    if (same_key && e->data_hash == h) {
+        e->gen = g_tex_gen;
+        t->pix = e->pix;
+        return;
+    }
+    if (!e->pix || e->w * e->h < t->w * t->h) {
+        free(e->pix);
+        e->pix = malloc((size_t)t->w * (size_t)t->h * 4);
+    }
+    t->pix = NULL;  // fetch() decodes from guest memory
+    for (int y = 0; y < t->h; y++)
+        for (int x = 0; x < t->w; x++) e->pix[y * t->w + x] = fetch(t, x, y);
+    e->addr = t->addr; e->key_fmt = key_fmt; e->key_size = key_size; e->key_clut = key_clut;
+    e->clut_hash = clut_hash; e->gen = g_tex_gen; e->data_hash = h; e->w = t->w; e->h = t->h;
+    t->pix = e->pix;
+}
+
 // u, v in texels
 static void sample(const TexState *t, float u, float v, float *out) {
+    const uint32_t *p = t->pix;
     if (!t->linear) {
         int x = wrap((int)floorf(u), t->w, t->clamp_u), y = wrap((int)floorf(v), t->h, t->clamp_v);
-        uint32_t c = fetch(t, x, y);
+        uint32_t c = p[y * t->w + x];
         out[0] = (float)(c & 0xFF); out[1] = (float)(c >> 8 & 0xFF);
         out[2] = (float)(c >> 16 & 0xFF); out[3] = (float)(c >> 24);
         return;
@@ -407,12 +485,9 @@ static void sample(const TexState *t, float u, float v, float *out) {
     v -= 0.5f;
     int x0 = (int)floorf(u), y0 = (int)floorf(v);
     float fx = u - (float)x0, fy = v - (float)y0;
-    uint32_t c[4] = {
-        fetch(t, wrap(x0, t->w, t->clamp_u), wrap(y0, t->h, t->clamp_v)),
-        fetch(t, wrap(x0 + 1, t->w, t->clamp_u), wrap(y0, t->h, t->clamp_v)),
-        fetch(t, wrap(x0, t->w, t->clamp_u), wrap(y0 + 1, t->h, t->clamp_v)),
-        fetch(t, wrap(x0 + 1, t->w, t->clamp_u), wrap(y0 + 1, t->h, t->clamp_v)),
-    };
+    int xa = wrap(x0, t->w, t->clamp_u), xb = wrap(x0 + 1, t->w, t->clamp_u);
+    int ya = wrap(y0, t->h, t->clamp_v) * t->w, yb = wrap(y0 + 1, t->h, t->clamp_v) * t->w;
+    uint32_t c[4] = {p[ya + xa], p[ya + xb], p[yb + xa], p[yb + xb]};
     for (int i = 0; i < 4; i++) {
         float a = (float)(c[0] >> (8 * i) & 0xFF), b = (float)(c[1] >> (8 * i) & 0xFF);
         float cc = (float)(c[2] >> (8 * i) & 0xFF), d = (float)(c[3] >> (8 * i) & 0xFF);
@@ -436,6 +511,7 @@ typedef struct {
 static void pix_state(PixState *p, int through) {
     target(&p->tg);
     tex_state(&p->tex);
+    if (p->tex.enabled) tex_cache_lookup(&p->tex);
     p->through = through;
     uint32_t cm = R(GE_CLEARMODE);
     p->clear = cm & 1;
@@ -490,10 +566,18 @@ static float blend_factor(int f, int is_src, const float *s, const float *d, uin
 
 static inline float clamp255(float v) { return v < 0.f ? 0.f : v > 255.f ? 255.f : v; }
 
+// ---------------------------------------------------------------- parallel bands
+// With RASTER_THREADS > 0, primitives are queued and every worker rasterizes
+// all of them, but only on its own rows (8-row bands, interleaved).
+static int g_nbands = 1;
+static __thread int tl_band;
+static inline int owns_row(int y) { return g_nbands == 1 || ((y >> 3) % g_nbands) == tl_band; }
+
 // Shade one pixel. col: interpolated vertex color; uv in texels.
 static void shade(const PixState *p, int x, int y, float z, const float *col, float u, float v) {
     const Target *t = &p->tg;
     if (x < t->sx1 || x > t->sx2 || y < t->sy1 || y > t->sy2 || x < 0 || y < 0 || x >= 1024 || y >= 1024) return;
+    if (!owns_row(y)) return;
     uint32_t za = t->zb + (uint32_t)(y * (int)t->zb_stride + x) * 2;
     int zi = (int)(z < 0.f ? 0.f : z > 65535.f ? 65535.f : z);
 
@@ -504,6 +588,13 @@ static void shade(const PixState *p, int x, int y, float z, const float *col, fl
         if (keep != 0xFFFFFFFFu) fb_write(t, x, y, c, keep);
         if (p->clear_depth) mem_w16(za, (uint16_t)zi);
         return;
+    }
+
+    // early depth test: skip texturing hidden pixels (alpha test must come first otherwise)
+    int z_done = 0;
+    if (p->z_test && !p->alpha_test) {
+        if (!cmp(p->z_func, zi, mem_r16(za))) return;
+        z_done = 1;
     }
 
     float c[4] = {col[0], col[1], col[2], col[3]};
@@ -540,7 +631,7 @@ static void shade(const PixState *p, int x, int y, float z, const float *col, fl
         int a = (int)clamp255(c[3]) & p->at_mask, ref = p->at_ref & p->at_mask;
         if (!cmp(p->at_func, a, ref)) return;
     }
-    if (p->z_test) {
+    if (p->z_test && !z_done) {
         if (!cmp(p->z_func, zi, mem_r16(za))) return;
     }
     if (p->blend) {
@@ -583,31 +674,44 @@ static void draw_triangle(const PixState *p, const SVtx *v0, const SVtx *v1, con
     float miny = fminf(v0->y, fminf(v1->y, v2->y)), maxy = fmaxf(v0->y, fmaxf(v1->y, v2->y));
     int x0 = (int)fmaxf(floorf(minx), (float)t->sx1), x1 = (int)fminf(ceilf(maxx), (float)t->sx2);
     int y0 = (int)fmaxf(floorf(miny), (float)t->sy1), y1 = (int)fminf(ceilf(maxy), (float)t->sy2);
-    if (x1 - x0 > 2048 || y1 - y0 > 2048) return;  // degenerate projection
+    if (x1 < x0 || y1 < y0 || x1 - x0 > 2048 || y1 - y0 > 2048) return;
     float inv = 1.f / area;
-    float tw = (float)p->tex.w, th = (float)p->tex.h;
-    for (int y = y0; y <= y1; y++) {
-        float py = (float)y + 0.5f;
-        for (int x = x0; x <= x1; x++) {
-            float px = (float)x + 0.5f;
-            float w0 = edge(v1, v2, px, py) * inv, w1 = edge(v2, v0, px, py) * inv, w2 = edge(v0, v1, px, py) * inv;
+    // barycentric weights are affine in screen space: w(x,y) = w0 + dx*x + dy*y
+    float e0x = -(v2->y - v1->y) * inv, e0y = (v2->x - v1->x) * inv;
+    float e1x = -(v0->y - v2->y) * inv, e1y = (v0->x - v2->x) * inv;
+    float e2x = -(v1->y - v0->y) * inv, e2y = (v1->x - v0->x) * inv;
+    float px0 = (float)x0 + 0.5f, py0 = (float)y0 + 0.5f;
+    float r0 = edge(v1, v2, px0, py0) * inv, r1 = edge(v2, v0, px0, py0) * inv, r2 = edge(v0, v1, px0, py0) * inv;
+    float tw = p->through ? 1.f : (float)p->tex.w, th = p->through ? 1.f : (float)p->tex.h;
+    int persp = !p->through;
+    float flat_col[4];
+    for (int i = 0; i < 4; i++) flat_col[i] = v2->c[i] / v2->iw;
+    for (int y = y0; y <= y1; y++, r0 += e0y, r1 += e1y, r2 += e2y) {
+        if (!owns_row(y)) continue;
+        // span of this row where all three weights are >= 0 (w = r + e*(x - x0))
+        float lo = 0.f, hi = (float)(x1 - x0);
+        const float rr[3] = {r0, r1, r2}, ee[3] = {e0x, e1x, e2x};
+        for (int i = 0; i < 3; i++) {
+            if (ee[i] > 0.f) lo = fmaxf(lo, -rr[i] / ee[i]);
+            else if (ee[i] < 0.f) hi = fminf(hi, rr[i] / -ee[i]);
+            else if (rr[i] < 0.f) hi = -1.f;
+        }
+        if (hi < lo) continue;
+        int xs = x0 + (int)ceilf(lo - 0.001f), xe = x0 + (int)floorf(hi + 0.001f);
+        if (xs < x0) xs = x0;
+        if (xe > x1) xe = x1;
+        float dx = (float)(xs - x0);
+        float w0 = r0 + e0x * dx, w1 = r1 + e1x * dx, w2 = r2 + e2x * dx;
+        for (int x = xs; x <= xe; x++, w0 += e0x, w1 += e1x, w2 += e2x) {
             if (w0 < 0.f || w1 < 0.f || w2 < 0.f) continue;
-            float iw = w0 * v0->iw + w1 * v1->iw + w2 * v2->iw;
-            float k = 1.f / iw;
+            float k = persp ? 1.f / (w0 * v0->iw + w1 * v1->iw + w2 * v2->iw) : 1.f;
             float z = w0 * v0->z + w1 * v1->z + w2 * v2->z;
             float col[4];
-            if (flat) memcpy(col, v2->c, sizeof col);
-            for (int i = 0; i < 4; i++) {
-                float ci = w0 * v0->c[i] + w1 * v1->c[i] + w2 * v2->c[i];
-                if (!flat) col[i] = ci * k;
-                else col[i] = v2->c[i] / v2->iw;
-            }
-            float u = (w0 * v0->u + w1 * v1->u + w2 * v2->u) * k;
-            float v = (w0 * v0->v + w1 * v1->v + w2 * v2->v) * k;
-            if (!p->through) {
-                u *= tw;
-                v *= th;
-            }
+            if (flat) memcpy(col, flat_col, sizeof col);
+            else
+                for (int i = 0; i < 4; i++) col[i] = (w0 * v0->c[i] + w1 * v1->c[i] + w2 * v2->c[i]) * k;
+            float u = (w0 * v0->u + w1 * v1->u + w2 * v2->u) * k * tw;
+            float v = (w0 * v0->v + w1 * v1->v + w2 * v2->v) * k * th;
             shade(p, x, y, z, col, u, v);
         }
     }
@@ -622,7 +726,8 @@ static void draw_rect(const PixState *p, const SVtx *a, const SVtx *b) {
     float du = (b->u - a->u) / (b->x - a->x ? b->x - a->x : 1.f);
     float dv = (b->v - a->v) / (b->y - a->y ? b->y - a->y : 1.f);
     float tw = (float)p->tex.w, th = (float)p->tex.h;
-    for (int y = iy0; y < iy1; y++)
+    for (int y = iy0; y < iy1; y++) {
+        if (!owns_row(y)) continue;
         for (int x = ix0; x < ix1; x++) {
             float u = a->u + ((float)x + 0.5f - a->x) * du, v = a->v + ((float)y + 0.5f - a->y) * dv;
             if (!p->through) {
@@ -631,6 +736,7 @@ static void draw_rect(const PixState *p, const SVtx *a, const SVtx *b) {
             }
             shade(p, x, y, b->z, col, u, v);
         }
+    }
 }
 
 static void draw_line(const PixState *p, const SVtx *a, const SVtx *b) {
@@ -641,6 +747,144 @@ static void draw_line(const PixState *p, const SVtx *a, const SVtx *b) {
         for (int k = 0; k < 4; k++) col[k] = (a->c[k] / a->iw) * (1 - t) + (b->c[k] / b->iw) * t;
         shade(p, (int)(a->x + dx * t), (int)(a->y + dy * t), a->z + (b->z - a->z) * t, col, a->u, a->v);
     }
+}
+
+// ---------------------------------------------------------------- job queue
+
+enum { JOB_TRI, JOB_RECT, JOB_LINE, JOB_POINT };
+typedef struct {
+    uint8_t kind, flat;
+    uint16_t state;
+    SVtx v[3];
+} Job;
+
+#define NJOBS 16384
+#define NSTATES 1024
+#define MAX_WORKERS 16
+static Job g_jobs[NJOBS];
+static PixState g_states[NSTATES];
+static int g_state_next;
+static uint64_t g_job_w, g_job_r[MAX_WORKERS];
+static int g_nworkers;
+static pthread_mutex_t g_q_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_q_work = PTHREAD_COND_INITIALIZER, g_q_done = PTHREAD_COND_INITIALIZER;
+static int g_cur_state = -1;
+static const PixState *g_cur_ps;
+
+static void run_job(const Job *j) {
+    const PixState *p = &g_states[j->state];
+    switch (j->kind) {
+    case JOB_TRI: draw_triangle(p, &j->v[0], &j->v[1], &j->v[2], j->flat); break;
+    case JOB_RECT: draw_rect(p, &j->v[0], &j->v[1]); break;
+    case JOB_LINE: draw_line(p, &j->v[0], &j->v[1]); break;
+    default: {
+        float col[4];
+        for (int k = 0; k < 4; k++) col[k] = j->v[0].c[k] / j->v[0].iw;
+        shade(p, (int)j->v[0].x, (int)j->v[0].y, j->v[0].z, col, j->v[0].u, j->v[0].v);
+    }
+    }
+}
+
+static void *raster_worker(void *arg) {
+    int me = (int)(intptr_t)arg;
+    tl_band = me;
+    pthread_mutex_lock(&g_q_lock);
+    for (;;) {
+        while (g_job_r[me] == g_job_w) pthread_cond_wait(&g_q_work, &g_q_lock);
+        uint64_t end = g_job_w;
+        pthread_mutex_unlock(&g_q_lock);
+        for (uint64_t i = g_job_r[me]; i < end; i++) run_job(&g_jobs[i % NJOBS]);
+        pthread_mutex_lock(&g_q_lock);
+        g_job_r[me] = end;
+        pthread_cond_broadcast(&g_q_done);
+    }
+    return NULL;
+}
+
+static uint64_t min_read(void) {
+    uint64_t m = g_job_w;
+    for (int k = 0; k < g_nworkers; k++)
+        if (g_job_r[k] < m) m = g_job_r[k];
+    return m;
+}
+
+// Wait until every queued primitive has been drawn.
+void raster_flush(void) {
+    if (!g_nworkers) return;
+    pthread_mutex_lock(&g_q_lock);
+    while (min_read() != g_job_w) pthread_cond_wait(&g_q_done, &g_q_lock);
+    pthread_mutex_unlock(&g_q_lock);
+}
+
+static void raster_init(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    const char *e = getenv("RASTER_THREADS");
+    long n = e ? atol(e) : sysconf(_SC_NPROCESSORS_ONLN) - 2;
+    if (n < 0) n = 0;
+    if (n > MAX_WORKERS) n = MAX_WORKERS;
+    if (n == 1) n = 0;  // one worker buys nothing over drawing inline
+    g_nworkers = (int)n;
+    g_nbands = n ? (int)n : 1;
+    for (int k = 0; k < g_nworkers; k++) {
+        pthread_t t;
+        pthread_create(&t, NULL, raster_worker, (void *)(intptr_t)k);
+        pthread_detach(t);
+    }
+    fprintf(stderr, "raster: %d worker threads\n", g_nworkers);
+}
+
+// Snapshot the pixel state for the primitives that follow.
+static void begin_state(const PixState *ps) {
+    g_cur_ps = ps;
+    if (!g_nworkers) return;
+    if (g_state_next == NSTATES) {  // wrapping: states still referenced must be done
+        raster_flush();
+        g_state_next = 0;
+    }
+    g_states[g_state_next] = *ps;
+    g_cur_state = g_state_next++;
+}
+
+static void submit(int kind, const SVtx *a, const SVtx *b, const SVtx *c, int flat) {
+    if (!g_nworkers) {
+        Job j = {.kind = (uint8_t)kind, .flat = (uint8_t)flat};
+        j.v[0] = *a;
+        if (b) j.v[1] = *b;
+        if (c) j.v[2] = *c;
+        switch (kind) {  // draw inline with the live state
+        case JOB_TRI: draw_triangle(g_cur_ps, a, b, c, flat); break;
+        case JOB_RECT: draw_rect(g_cur_ps, a, b); break;
+        case JOB_LINE: draw_line(g_cur_ps, a, b); break;
+        default: {
+            float col[4];
+            for (int k = 0; k < 4; k++) col[k] = a->c[k] / a->iw;
+            shade(g_cur_ps, (int)a->x, (int)a->y, a->z, col, a->u, a->v);
+        }
+        }
+        return;
+    }
+    pthread_mutex_lock(&g_q_lock);
+    while (g_job_w - min_read() >= NJOBS) pthread_cond_wait(&g_q_done, &g_q_lock);
+    Job *j = &g_jobs[g_job_w % NJOBS];
+    j->kind = (uint8_t)kind;
+    j->flat = (uint8_t)flat;
+    j->state = (uint16_t)g_cur_state;
+    j->v[0] = *a;
+    if (b) j->v[1] = *b;
+    if (c) j->v[2] = *c;
+    g_job_w++;
+    if ((g_job_w & 15) == 0) pthread_cond_broadcast(&g_q_work);  // wake in batches
+    pthread_mutex_unlock(&g_q_lock);
+}
+
+// Make queued work visible to the workers (end of a primitive batch).
+static void kick(void) {
+    if (!g_nworkers) return;
+    pthread_mutex_lock(&g_q_lock);
+    pthread_cond_broadcast(&g_q_work);
+    pthread_mutex_unlock(&g_q_lock);
 }
 
 // Clip a triangle against the near plane (z > -w) in clip space.
@@ -683,7 +927,7 @@ static void emit_triangle(const PixState *p, const Vtx *a, const Vtx *b, const V
     SVtx s[8];
     for (int i = 0; i < n; i++) to_screen(&poly[i], &s[i], p->through);
     if (!p->through && cull_reject(&s[0], &s[1], &s[2], odd)) return;
-    for (int i = 1; i + 1 < n; i++) draw_triangle(p, &s[0], &s[i], &s[i + 1], flat);
+    for (int i = 1; i + 1 < n; i++) submit(JOB_TRI, &s[0], &s[i], &s[i + 1], flat);
 }
 
 #define MAX_VERTS 65536
@@ -695,8 +939,10 @@ void gpu_draw_prim(int prim, int count) {
     if (count > MAX_VERTS) count = MAX_VERTS;
     VFormat f;
     vformat(&f, R(GE_VERTEXTYPE));
+    raster_init();
     PixState ps;
     pix_state(&ps, f.through);
+    begin_state(&ps);
 
     // gather vertices (indexed or sequential)
     uint32_t vbase = g_ge.vaddr;
@@ -720,9 +966,7 @@ void gpu_draw_prim(int prim, int count) {
         for (int i = 0; i < count; i++) {
             SVtx s;
             to_screen(&v[i], &s, f.through);
-            float col[4];
-            for (int k = 0; k < 4; k++) col[k] = s.c[k] / s.iw;
-            shade(&ps, (int)s.x, (int)s.y, s.z, col, s.u, s.v);
+            submit(JOB_POINT, &s, NULL, NULL, 0);
         }
         break;
     case 1: case 2:  // lines, line strip
@@ -730,7 +974,7 @@ void gpu_draw_prim(int prim, int count) {
             SVtx a, b;
             to_screen(&v[i], &a, f.through);
             to_screen(&v[i + 1], &b, f.through);
-            draw_line(&ps, &a, &b);
+            submit(JOB_LINE, &a, &b, NULL, 0);
         }
         break;
     case 3:  // triangles
@@ -747,17 +991,19 @@ void gpu_draw_prim(int prim, int count) {
             SVtx a, b;
             to_screen(&v[i], &a, f.through);
             to_screen(&v[i + 1], &b, f.through);
-            draw_rect(&ps, &a, &b);
+            submit(JOB_RECT, &a, &b, NULL, 0);
         }
         break;
     }
     (void)max_index;
+    kick();
 }
 
 // ---------------------------------------------------------------- transfers
 
 // Copy a rectangle between two VRAM/RAM surfaces (GE_TRANSFERSTART).
 void gpu_block_transfer(void) {
+    raster_flush();
     const uint32_t *r = g_ge.cmd;
     uint32_t src = (r[GE_TRANSFERSRC] & 0xFFFFF0u) | ((r[GE_TRANSFERSRCW] & 0xFF0000u) << 8);
     uint32_t dst = (r[GE_TRANSFERDST] & 0xFFFFF0u) | ((r[GE_TRANSFERDSTW] & 0xFF0000u) << 8);
