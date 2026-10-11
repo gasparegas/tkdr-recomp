@@ -137,8 +137,79 @@ static void material_color(float *c) {
     c[3] = (float)(R(GE_MATERIALALPHA) & 0xFF);
 }
 
+// ---------------------------------------------------------------- lighting
+
+static void rgb24(uint32_t v, float *c) {
+    c[0] = (float)(v & 0xFF); c[1] = (float)(v >> 8 & 0xFF); c[2] = (float)(v >> 16 & 0xFF);
+}
+
+// GE vertex lighting, in world space. col: vertex color (in/out, 0..255).
+static void light_vertex(const float *wp, float *n, float *col, int has_color) {
+    float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (len > 0.f) for (int i = 0; i < 3; i++) n[i] /= len;
+    if (R(GE_REVERSENORMAL) & 1) for (int i = 0; i < 3; i++) n[i] = -n[i];
+    uint32_t mu = has_color ? R(GE_MATERIALUPDATE) & 7 : 0;
+    float ma[4], md[3], ms[3], me[3], ga[4];
+    if (mu & 1) memcpy(ma, col, sizeof ma);
+    else { rgb24(R(GE_MATERIALAMBIENT), ma); ma[3] = (float)(R(GE_MATERIALALPHA) & 0xFF); }
+    if (mu & 2) memcpy(md, col, sizeof md); else rgb24(R(GE_MATERIALDIFFUSE), md);
+    if (mu & 4) memcpy(ms, col, sizeof ms); else rgb24(R(GE_MATERIALSPECULAR), ms);
+    rgb24(R(GE_MATERIALEMISSIVE), me);
+    rgb24(R(GE_AMBIENTCOLOR), ga);
+    ga[3] = (float)(R(GE_AMBIENTALPHA) & 0xFF);
+    float spec_exp = ge_float(R(GE_MATERIALSPECULARCOEF));
+    float out[3], spec[3] = {0, 0, 0};
+    for (int i = 0; i < 3; i++) out[i] = me[i] + ma[i] * ga[i] / 255.f;
+    float alpha = ma[3] * ga[3] / 255.f;
+    for (int l = 0; l < 4; l++) {
+        if (!(R(GE_LIGHTENABLE0 + l) & 1)) continue;
+        uint32_t type = R(GE_LIGHTTYPE0 + l), kind = type >> 8 & 3, comp = type & 3;
+        float L[3] = {ge_float(R(GE_LX0 + 3 * l)), ge_float(R(GE_LX0 + 3 * l + 1)), ge_float(R(GE_LX0 + 3 * l + 2))};
+        float att = 1.f, spot = 1.f;
+        if (kind != 0) {  // point/spot: vector from the vertex to the light
+            for (int i = 0; i < 3; i++) L[i] -= wp[i];
+            float d = sqrtf(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
+            if (d > 0.f) for (int i = 0; i < 3; i++) L[i] /= d;
+            float ka = ge_float(R(GE_LKA0 + 3 * l)), kb = ge_float(R(GE_LKA0 + 3 * l + 1)), kc = ge_float(R(GE_LKA0 + 3 * l + 2));
+            float den = ka + kb * d + kc * d * d;
+            att = den > 0.f ? fminf(1.f / den, 1.f) : 0.f;
+            if (kind == 2) {
+                float D[3] = {ge_float(R(GE_LDX0 + 3 * l)), ge_float(R(GE_LDX0 + 3 * l + 1)), ge_float(R(GE_LDX0 + 3 * l + 2))};
+                float dl = sqrtf(D[0] * D[0] + D[1] * D[1] + D[2] * D[2]);
+                float sd = dl > 0.f ? -(D[0] * L[0] + D[1] * L[1] + D[2] * L[2]) / dl : 0.f;
+                float cutoff = ge_float(R(GE_LKO0 + l)), ex = ge_float(R(GE_LKS0 + l));
+                spot = sd >= cutoff ? powf(fmaxf(sd, 0.f), ex) : 0.f;
+            }
+        } else {
+            float d = sqrtf(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
+            if (d > 0.f) for (int i = 0; i < 3; i++) L[i] /= d;
+        }
+        float ndotl = n[0] * L[0] + n[1] * L[1] + n[2] * L[2];
+        float diff = ndotl > 0.f ? ndotl : 0.f;
+        if (comp == 2) diff = powf(diff, spec_exp);  // powered diffuse
+        float la[3], ld[3], ls[3];
+        rgb24(R(GE_LAC0 + 3 * l), la);
+        rgb24(R(GE_LAC0 + 3 * l + 1), ld);
+        rgb24(R(GE_LAC0 + 3 * l + 2), ls);
+        float k = att * spot;
+        for (int i = 0; i < 3; i++) out[i] += k * (la[i] * ma[i] + ld[i] * md[i] * diff) / 255.f;
+        if (comp == 1 && ndotl > 0.f) {  // specular, viewer along +z
+            float H[3] = {L[0], L[1], L[2] + 1.f};
+            float hl = sqrtf(H[0] * H[0] + H[1] * H[1] + H[2] * H[2]);
+            float ndoth = hl > 0.f ? (n[0] * H[0] + n[1] * H[1] + n[2] * H[2]) / hl : 0.f;
+            float sp = ndoth > 0.f ? powf(ndoth, spec_exp) : 0.f;
+            for (int i = 0; i < 3; i++) spec[i] += k * ls[i] * ms[i] * sp / 255.f;
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        float v = out[i] + spec[i];
+        col[i] = v > 255.f ? 255.f : v;
+    }
+    col[3] = alpha > 255.f ? 255.f : alpha;
+}
+
 static void decode_vertex(const VFormat *f, uint32_t base, Vtx *out) {
-    float pos[3] = {0}, tc[2] = {0}, col[4] = {0}, w[8] = {0};
+    float pos[3] = {0}, tc[2] = {0}, col[4] = {0}, w[8] = {0}, nrm[3] = {0};
     int have_col = f->col != 0;
     // morphing: blend every component of the morph targets
     for (int m = 0; m < f->nmorph; m++) {
@@ -155,6 +226,8 @@ static void decode_vertex(const VFormat *f, uint32_t base, Vtx *out) {
         }
         if (f->wt)
             for (int i = 0; i < f->nw; i++) w[i] += k * rd_comp(a + (uint32_t)f->off_wt, f->wt, i, 0, 0);
+        if (f->nrm)
+            for (int i = 0; i < 3; i++) nrm[i] += k * rd_comp(a + (uint32_t)f->off_nrm, f->nrm, i, 0, 1);
     }
     if (f->through && f->pos == 2) pos[2] = (float)(uint16_t)(int16_t)pos[2];  // z is unsigned
     if (!have_col) material_color(col);
@@ -163,18 +236,30 @@ static void decode_vertex(const VFormat *f, uint32_t base, Vtx *out) {
         out->x = pos[0]; out->y = pos[1]; out->z = pos[2]; out->w = 1.f;
         out->u = tc[0]; out->v = tc[1];
     } else {
-        float wp[3];
+        float wp[3], wn[3] = {0, 0, 0}, mn[3] = {nrm[0], nrm[1], nrm[2]};
+        int lit = (R(GE_LIGHTINGENABLE) & 1) != 0;
         if (f->wt) {  // skinning: weighted sum of bone transforms
             wp[0] = wp[1] = wp[2] = 0.f;
+            float sn[3] = {0, 0, 0};
             for (int i = 0; i < f->nw; i++) {
                 float t[3];
                 mul43(g_ge.bone[i], pos, t);
                 for (int j = 0; j < 3; j++) wp[j] += w[i] * t[j];
+                if (lit) {
+                    const float *b = g_ge.bone[i];
+                    for (int j = 0; j < 3; j++) sn[j] += w[i] * (b[j] * nrm[0] + b[3 + j] * nrm[1] + b[6 + j] * nrm[2]);
+                }
             }
             float t[3] = {wp[0], wp[1], wp[2]};
             mul43(g_ge.world, t, wp);
+            memcpy(mn, sn, sizeof mn);
         } else {
             mul43(g_ge.world, pos, wp);
+        }
+        if (lit) {
+            const float *m = g_ge.world;
+            for (int j = 0; j < 3; j++) wn[j] = m[j] * mn[0] + m[3 + j] * mn[1] + m[6 + j] * mn[2];
+            light_vertex(wp, wn, col, have_col);
         }
         float vp[3];
         mul43(g_ge.view, wp, vp);
