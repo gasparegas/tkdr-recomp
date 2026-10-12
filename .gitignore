@@ -12,3 +12,4 @@ game/
 __pycache__/
 build/
 .claude/
+third_party/ffmpeg/

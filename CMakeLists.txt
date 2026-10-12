@@ -23,6 +23,14 @@ endif()
 add_executable(tkdr runtime/main.c runtime/vfpu.c runtime/frontend.c ${HLE_SOURCES} ${GENERATED_SOURCES})
 target_include_directories(tkdr PRIVATE runtime ${GEN_DIR})
 target_link_libraries(tkdr PRIVATE at3)
+# minimal FFmpeg (H.264 only), built by tools/build_ffmpeg.sh
+if(EMSCRIPTEN)
+    set(FFMPEG_DIR ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/web)
+else()
+    set(FFMPEG_DIR ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/native)
+endif()
+target_include_directories(tkdr PRIVATE ${FFMPEG_DIR}/include)
+target_link_libraries(tkdr PRIVATE ${FFMPEG_DIR}/lib/libavcodec.a ${FFMPEG_DIR}/lib/libavutil.a)
 # generated code relies on wrapping arithmetic and unaligned memcpy
 target_compile_options(tkdr PRIVATE -fwrapv -fno-strict-aliasing -Wno-unused-label
                        -Wno-unused-variable -Wno-parentheses-equality -Wno-tautological-compare)
