@@ -1,45 +1,80 @@
-// sceAudio output channels and the sceSasCore mixer (silent for now).
-// Blocking output paces the calling thread at 44.1 kHz; samples go to a ring
-// buffer that the frontend's audio callback drains.
+// sceAudio output channels. Blocking output paces the calling thread at
+// 44.1 kHz; every channel has its own ring buffer and the consumer (the
+// frontend's audio callback, or the dump clock in headless mode) mixes them.
 #include <pthread.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "hle.h"
 
 #define NCH 8
-#define RING 32768  // stereo frames
+#define RING 16384  // stereo frames per channel
 
 typedef struct {
     int reserved;
     uint32_t samples, format;  // format 0x00 stereo, 0x10 mono
     uint32_t lvol, rvol;
     uint64_t busy_until;  // when the hardware will have played what we queued
+    int16_t ring[RING][2];
+    uint32_t w, r;
 } Channel;
 
 static Channel g_ch[NCH];
-static int16_t g_ring[RING][2];
-static uint32_t g_ring_w, g_ring_r;
 static pthread_mutex_t g_ring_lock = PTHREAD_MUTEX_INITIALIZER;
 
-// Called by the frontend audio callback: interleaved stereo s16.
+static int16_t clamp_s16(int32_t v) { return (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
+
+// Mix all channels into interleaved stereo s16.
 void audio_pull(int16_t *out, int frames) {
     pthread_mutex_lock(&g_ring_lock);
     for (int i = 0; i < frames; i++) {
-        if (g_ring_r != g_ring_w) {
-            out[i * 2] = g_ring[g_ring_r % RING][0];
-            out[i * 2 + 1] = g_ring[g_ring_r % RING][1];
-            g_ring_r++;
-        } else {
-            out[i * 2] = out[i * 2 + 1] = 0;
+        int32_t l = 0, r = 0;
+        for (int k = 0; k < NCH; k++) {
+            Channel *ch = &g_ch[k];
+            if (ch->r == ch->w) continue;
+            l += ch->ring[ch->r % RING][0];
+            r += ch->ring[ch->r % RING][1];
+            ch->r++;
         }
+        out[i * 2] = clamp_s16(l);
+        out[i * 2 + 1] = clamp_s16(r);
     }
     pthread_mutex_unlock(&g_ring_lock);
 }
 
-static void mix_into_ring(const Channel *ch, uint32_t buf, uint32_t lvol, uint32_t rvol) {
+// AUDIO_DUMP=file.raw (headless): consume audio at the guest clock's pace and
+// write it out as raw s16 stereo 44.1 kHz.
+static void *dump_clock(void *arg) {
+    FILE *f = arg;
+    uint64_t pulled = 0;
+    int16_t buf[4096 * 2];
+    for (;;) {
+        usleep(5000);
+        uint64_t target = hle_time_us() * 44100u / 1000000u;
+        while (pulled < target) {
+            int n = target - pulled > 4096 ? 4096 : (int)(target - pulled);
+            audio_pull(buf, n);
+            fwrite(buf, 4, (size_t)n, f);
+            pulled += (uint64_t)n;
+        }
+        fflush(f);
+    }
+    return NULL;
+}
+
+void audio_start_dump(void) {
+    const char *path = getenv("AUDIO_DUMP");
+    FILE *f = path ? fopen(path, "wb") : NULL;
+    if (!f) return;
+    pthread_t t;
+    pthread_create(&t, NULL, dump_clock, f);
+    pthread_detach(t);
+}
+
+static void mix_into_ring(Channel *ch, uint32_t buf, uint32_t lvol, uint32_t rvol) {
     pthread_mutex_lock(&g_ring_lock);
     // drop old audio if the consumer fell behind (or there is none)
-    if (g_ring_w - g_ring_r > RING - ch->samples) g_ring_r = g_ring_w - (RING - ch->samples);
+    if (ch->w - ch->r > RING - ch->samples) ch->r = ch->w - (RING - ch->samples);
     int mono = ch->format == 0x10;
     for (uint32_t i = 0; i < ch->samples; i++) {
         int32_t l, r;
@@ -48,13 +83,11 @@ static void mix_into_ring(const Channel *ch, uint32_t buf, uint32_t lvol, uint32
             l = (int16_t)mem_r16(buf + i * 4);
             r = (int16_t)mem_r16(buf + i * 4 + 2);
         }
-        l = l * (int32_t)lvol / 0x8000;
-        r = r * (int32_t)rvol / 0x8000;
-        int16_t *slot = g_ring[(g_ring_w + i) % RING];
-        slot[0] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l);
-        slot[1] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+        int16_t *slot = ch->ring[(ch->w + i) % RING];
+        slot[0] = clamp_s16(l * (int32_t)lvol / 0x8000);
+        slot[1] = clamp_s16(r * (int32_t)rvol / 0x8000);
     }
-    g_ring_w += ch->samples;  // TODO: mix concurrent channels instead of queueing them
+    ch->w += ch->samples;
     pthread_mutex_unlock(&g_ring_lock);
 }
 
@@ -83,7 +116,10 @@ void sceAudioChReserve(Ctx *c) {
         for (int k = NCH - 1; k >= 0; k--)
             if (!g_ch[k].reserved) { ch = k; break; }
     if (ch < 0 || ch >= NCH || g_ch[ch].reserved) { RET(0x80260002u); return; }
-    g_ch[ch] = (Channel){.reserved = 1, .samples = ARG(1), .format = ARG(2)};
+    memset(&g_ch[ch], 0, sizeof g_ch[ch]);
+    g_ch[ch].reserved = 1;
+    g_ch[ch].samples = ARG(1);
+    g_ch[ch].format = ARG(2);
     RET(ch);
 }
 void sceAudioChRelease(Ctx *c) {

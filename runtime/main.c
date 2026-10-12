@@ -194,6 +194,8 @@ int main(int argc, char **argv) {
     fprintf(stderr, "starting module_start at %08X\n", g_entry);
     sched_boot(&boot);
     if (getenv("HEADLESS")) {
+        extern void audio_start_dump(void);
+        audio_start_dump();
         // WATCH=addr,addr,...: print those words (as hex and float) every second
         const char *watch = getenv("WATCH");
         int secs = getenv("RUN_SECONDS") ? atoi(getenv("RUN_SECONDS")) : 0;
