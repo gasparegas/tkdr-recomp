@@ -73,6 +73,11 @@ never uploaded. Save data stays in the browser (IndexedDB).
 
 Gamepads work too (face buttons in the PSP layout; the left stick also drives the d-pad).
 
+On phones and tablets the browser build goes full screen with on-screen
+controls (d-pad, face buttons, L/R, Start/Select, ≡ for settings); portrait puts
+the game on top and the controls below. *F1 → Input* sets them to always/never
+and their opacity; they also appear on touch laptops after the first touch.
+
 Press **F1** for the settings overlay: input devices and bindings (keyboard,
 gamepads, arcade sticks, hitboxes, with SOCD options) and texture packs.
 

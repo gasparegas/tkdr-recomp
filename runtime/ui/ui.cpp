@@ -7,8 +7,10 @@
 #include "../../third_party/imgui/backends/imgui_impl_sdlrenderer2.h"
 #include "../../third_party/imgui/imgui.h"
 #include "input.h"
+#include "touch.h"
 
 static SDL_Renderer *g_ren;
+static SDL_Window *g_win;
 static bool g_open;
 static int g_capture_action = -1;  // action waiting for an input to bind
 static bool g_capture_armed;  // wait until everything is released first
@@ -18,6 +20,7 @@ extern "C" {
 
 void ui_init(SDL_Window *win, SDL_Renderer *ren) {
     g_ren = ren;
+    g_win = win;
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
@@ -28,10 +31,14 @@ void ui_init(SDL_Window *win, SDL_Renderer *ren) {
     ImGui_ImplSDLRenderer2_Init(ren);
     input_load();
     video_load();
+    touch_load();
 }
 
 int ui_menu_open(void) { return g_open; }
-void ui_set_open(int open) { g_open = open != 0; }
+void ui_set_open(int open) {
+    g_open = open != 0;
+    touch_reset();
+}
 
 // Returns 1 when the event belongs to the overlay.
 int ui_event(SDL_Event *e) {
@@ -42,12 +49,16 @@ int ui_event(SDL_Event *e) {
     }
     if (e->type == SDL_JOYDEVICEADDED) input_device_added(e->jdevice.which);
     if (e->type == SDL_JOYDEVICEREMOVED) input_device_removed(e->jdevice.which);
-    if (!g_open) return 0;
+    if (!g_open) {
+        int w, h;
+        SDL_GetWindowSize(g_win, &w, &h);
+        return touch_event(e, (float)w, (float)h);
+    }
     ImGui_ImplSDL2_ProcessEvent(e);
     return 1;
 }
 
-uint32_t ui_input_mask(void) { return g_open ? 0 : input_poll(); }
+uint32_t ui_input_mask(void) { return g_open ? 0 : input_poll() | touch_mask(); }
 
 }  // extern "C"
 
@@ -129,6 +140,9 @@ static void input_tab() {
     if (ImGui::Combo("SOCD Left+Right", &lr, k_socd_names, 3)) g_input.socd_lr = (Socd)lr;
     if (ImGui::Combo("SOCD Up+Down", &ud, k_socd_names, 5)) g_input.socd_ud = (Socd)ud;
     ImGui::SliderInt("Stick deadzone", &g_input.axis_deadzone, 2000, 30000);
+    static const char *k_touch_modes[] = {"Auto (on first touch)", "Always", "Never"};
+    if (ImGui::Combo("Touch controls", &g_touch_mode, k_touch_modes, 3)) touch_save();
+    if (ImGui::SliderFloat("Touch opacity", &g_touch_opacity, 0.1f, 1.f, "%.2f")) touch_save();
 
     // live test: what the game would receive right now
     uint32_t mask = input_poll();
@@ -207,13 +221,24 @@ static void input_tab() {
 }
 
 extern "C" void ui_draw(void) {
-    if (!g_open) return;
+    bool touch = !g_open && touch_visible();
+    if (!g_open && !touch) return;
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
-    ImGui::SetNextWindowSize(ImVec2(560, 460), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("tkdr settings (F1)", nullptr)) {
+    if (touch) {
+        ImVec2 ds = ImGui::GetIO().DisplaySize;
+        touch_draw(ImGui::GetBackgroundDrawList(), ds.x, ds.y);
+    }
+    // fits small screens (phones) too
+    ImVec2 ds = ImGui::GetIO().DisplaySize;
+    float mw = ds.x - 16.f < 560.f ? ds.x - 16.f : 560.f, mh = ds.y - 16.f < 460.f ? ds.y - 16.f : 460.f;
+    ImGui::SetNextWindowSize(ImVec2(mw, mh), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(ds.x < 600.f ? 8.f : 20.f, ds.y < 500.f ? 8.f : 20.f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(200.f, 150.f), ImVec2(ds.x - 8.f, ds.y - 8.f));
+    if (g_open) touch_reset();  // fingers lifted over the menu never reached the controls
+    if (g_open) {
+    if (ImGui::Begin("tkdr settings (F1)", &g_open)) {
         if (ImGui::BeginTabBar("tabs")) {
             if (ImGui::BeginTabItem("Input")) {
                 input_tab();
@@ -235,6 +260,7 @@ extern "C" void ui_draw(void) {
         }
     }
     ImGui::End();
+    }
     ImGui::Render();
     // HiDPI: ImGui works in window points, the renderer in pixels
     ImVec2 scale = ImGui::GetIO().DisplayFramebufferScale;

@@ -57,6 +57,8 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
 | `INPUT="118:START,118.3:"` | scripted buttons at guest times (also as URL params on the web) |
 | `GE_CAPTURE=secs` | save the first display list started after that guest time (GE state, VRAM, RAM) to `GE_CAPTURE_FILE` (default `ge_capture.bin`) |
 | `GE_REPLAY=file` | no game: draw a capture `GE_REPLAY_ITERS` times (default 20), print ms/frame, save `GE_REPLAY_OUT=out.ppm`; with `RENDER_SCALE`, `RASTER_THREADS` |
+| `TOUCH=1` | show the on-screen controls from the start (web: `?touch`) |
+| `UI_PREVIEW_NOMENU=1`, `UI_PREVIEW_SIZE=WxH` | with `UI_PREVIEW`: overlay without the menu, at a window size (e.g. a phone) |
 | `RENDER_SCALE=n` | internal resolution 1..4 (overrides the F1 > Video setting) |
 | `TEX_DIR=dir` | texture pack folder (default `textures/ULUS10139`) |
 | `TEX_DUMP=1` | dump every new texture as PNG into `TEX_DIR/new/` (PPSSPP names) |

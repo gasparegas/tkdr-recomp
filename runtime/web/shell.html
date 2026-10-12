@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>tkdr</title>
 <style>
   :root { color-scheme: dark; }
@@ -12,6 +12,15 @@
   #pick { padding: 24px; border: 1px dashed #555; border-radius: 8px; text-align: center; max-width: 520px; }
   #status { font-family: ui-monospace, monospace; font-size: 13px; color: #9a9a9a; }
   kbd { background: #222; border: 1px solid #444; border-radius: 4px; padding: 0 5px; }
+  /* touch devices: the game takes the whole screen, on-screen controls are drawn in the canvas */
+  body.play { padding: 0; overflow: hidden; overscroll-behavior: none; }
+  body.play canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; aspect-ratio: auto;
+                     touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  body.play #status, body.play #help { display: none; }
+  #fs { display: none; position: fixed; bottom: max(8px, env(safe-area-inset-bottom)); right: max(8px, env(safe-area-inset-right));
+        z-index: 2; width: 36px; height: 36px; border-radius: 18px; border: 1px solid #fff5; background: #0006; color: #fffc;
+        font-size: 18px; line-height: 1; }
+  body.play #fs { display: block; }
 </style>
 </head>
 <body>
@@ -21,7 +30,8 @@
 </div>
 <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
 <div id="status">waiting for the ISO…</div>
-<div>Arrows: move · <kbd>Enter</kbd> Start · <kbd>Space</kbd> Select · <kbd>Z</kbd> <kbd>X</kbd> <kbd>C</kbd> <kbd>S</kbd> □ ✕ ○ △ · <kbd>Q</kbd> <kbd>W</kbd> L/R</div>
+<button id="fs" aria-label="Full screen">⛶</button>
+<div id="help">Arrows: move · <kbd>Enter</kbd> Start · <kbd>Space</kbd> Select · <kbd>Z</kbd> <kbd>X</kbd> <kbd>C</kbd> <kbd>S</kbd> □ ✕ ○ △ · <kbd>Q</kbd> <kbd>W</kbd> L/R</div>
 <script>
   var statusEl = document.getElementById('status');
   var Module = {
@@ -37,6 +47,27 @@
     printErr: function (t) { console.warn(t); statusEl.textContent = t; },
     setStatus: function (t) { if (t) statusEl.textContent = t; },
   };
+  // Phones and tablets: full-screen canvas with on-screen controls (drawn by the game, see touch.cpp)
+  var touchDevice = matchMedia('(pointer: coarse)').matches || new URLSearchParams(location.search).has('touch');
+  function fitCanvas() {
+    if (Module._web_resize) Module._web_resize(innerWidth, innerHeight);
+  }
+  function startPlay() {
+    if (!touchDevice) return;
+    document.body.classList.add('play');
+    ENV.TOUCH = '1';
+    addEventListener('resize', fitCanvas);
+    if (window.visualViewport) visualViewport.addEventListener('resize', fitCanvas);
+    // the window exists once main() has run a frame
+    var tries = 0, t = setInterval(function () { fitCanvas(); if (++tries > 20) clearInterval(t); }, 250);
+  }
+  document.getElementById('fs').addEventListener('click', function () {
+    var el = document.documentElement;
+    var p = el.requestFullscreen ? el.requestFullscreen() : (el.webkitRequestFullscreen && el.webkitRequestFullscreen());
+    Promise.resolve(p).then(function () {
+      if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(function () {});
+    }).catch(function () {});
+  });
   // ?iso=URL: read the ISO over HTTP range requests instead (local testing)
   var isoUrl = new URLSearchParams(location.search).get('iso');
   if (isoUrl) {
@@ -44,6 +75,7 @@
     Module.preRun.push(function () {
       // pass other query parameters (INPUT, TIME_SCALE, ...) as environment variables
       new URLSearchParams(location.search).forEach(function (v, k) { if (k !== 'iso') ENV[k] = v; });
+      startPlay();
       document.getElementById('pick').style.display = 'none';
       statusEl.textContent = 'starting from ' + isoUrl + '…';
     });
@@ -53,6 +85,7 @@
     var file = e.target.files[0];
     if (!file) return;
     Module.isoFile = file;
+    startPlay();
     document.getElementById('pick').style.display = 'none';
     statusEl.textContent = 'starting ' + file.name + ' (' + (file.size / 1048576).toFixed(0) + ' MB)…';
     Module.canvas.focus();

@@ -51,11 +51,12 @@ if(EMSCRIPTEN)
         -pthread -sUSE_SDL=2
         -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=768MB
         -sSTACK_SIZE=1MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB
-        -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV,FS,IDBFS,addRunDependency,removeRunDependency -sEXPORTED_FUNCTIONS=_main,_web_present,_web_frames,_web_time
+        -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV,FS,IDBFS,addRunDependency,removeRunDependency -sEXPORTED_FUNCTIONS=_main,_web_present,_web_frames,_web_time,_web_resize
         -sENVIRONMENT=web,worker -lidbfs.js -sFORCE_FILESYSTEM=1
         --preload-file ${GEN_DIR}/image.bin@image.bin
         --shell-file ${CMAKE_SOURCE_DIR}/runtime/web/shell.html)
-    set_target_properties(tkdr PROPERTIES SUFFIX ".html")
+    set_target_properties(tkdr PROPERTIES SUFFIX ".html"
+                          LINK_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/web/shell.html)  # relink when the page changes
     target_link_libraries(tkdr PRIVATE m)
 else()
     find_package(SDL2 REQUIRED)

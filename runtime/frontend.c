@@ -87,6 +87,8 @@ static void frame(void) {
     if (dst.h > wh) dst = (SDL_Rect){0, 0, wh * 480 / 272, wh};
     dst.x = (ww - dst.w) / 2;
     dst.y = (wh - dst.h) / 2;
+    int touch_visible(void);
+    if (touch_visible() && wh > ww) dst.y = 0;  // portrait phone: game on top, controls below
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
     SDL_RenderCopy(ren, tex, NULL, &dst);
@@ -111,6 +113,10 @@ static void frame(void) {
 // Debug hooks callable from the page: present a frame now (works even when
 // requestAnimationFrame is paused) and read the guest frame counter.
 EMSCRIPTEN_KEEPALIVE void web_present(void) { frame(); }
+// The page resized the canvas (full-screen play on phones): follow it, in CSS pixels.
+EMSCRIPTEN_KEEPALIVE void web_resize(int w, int h) {
+    if (win && w > 0 && h > 0) SDL_SetWindowSize(win, w, h);
+}
 EMSCRIPTEN_KEEPALIVE double web_time(void) { return (double)hle_time_us() / 1e6; }
 EMSCRIPTEN_KEEPALIVE uint32_t web_frames(void) {
     extern uint32_t g_frames_presented;
@@ -139,7 +145,10 @@ void frontend_run(void) {
     if (preview) {
         void ui_set_open(int open);
         SDL_Delay(1000 * (getenv("UI_PREVIEW_DELAY") ? (Uint32)atoi(getenv("UI_PREVIEW_DELAY")) : 5));
-        ui_set_open(1);
+        if (!getenv("UI_PREVIEW_NOMENU")) ui_set_open(1);
+        int pw, ph;  // UI_PREVIEW_SIZE=WxH: e.g. a phone held upright
+        if (getenv("UI_PREVIEW_SIZE") && sscanf(getenv("UI_PREVIEW_SIZE"), "%dx%d", &pw, &ph) == 2)
+            SDL_SetWindowSize(win, pw, ph);
         for (int i = 0; i < 4; i++) frame();
         int w, h;
         SDL_GetRendererOutputSize(ren, &w, &h);
