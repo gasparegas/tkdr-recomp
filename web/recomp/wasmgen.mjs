@@ -13,9 +13,29 @@ import { Code, I32, I64, Module, OP } from "./wasm.mjs";
 export const CTX = { r: 0, hi: 128, lo: 132, f: 136, fcr31: 264, fcc: 268, v: 272, vctrl: 784, ic: 848, size: 852 };
 const R = (n) => CTX.r + 4 * n, F = (n) => CTX.f + 4 * n;
 
-// locals of a guest function
-const C = 0, L = 1, T = 2, A = 3, B = 4, P = 5;
-const LOCALS = [[4, I32], [1, I64]];
+// locals of a guest function; GPRs $1..$31 are cached in locals REG + n - 1
+// (loaded on entry, written back before calls and returns, reloaded after calls)
+const C = 0, L = 1, T = 2, A = 3, B = 4, P = 5, REG = 6;
+const LOCALS = [[4, I32], [1, I64], [31, I32]];
+
+const RD_WRITERS = new Set(["addu", "add", "subu", "sub", "and", "or", "xor", "nor", "slt", "sltu", "max", "min",
+    "movz", "movn", "sll", "srl", "sra", "rotr", "sllv", "srlv", "srav", "rotrv", "clz", "clo", "mfhi", "mflo",
+    "seb", "seh", "wsbh", "wsbw", "bitrev"]);
+const RT_WRITERS = new Set(["addiu", "addi", "slti", "sltiu", "andi", "ori", "xori", "lui", "lb", "lbu", "lh", "lhu",
+    "lw", "ll", "lwl", "lwr", "sc", "mfic", "ext", "ins", "mfc1", "cfc1"]);
+
+// GPR written by generated code for this instruction (0: none)
+function written(i) {
+    if (RD_WRITERS.has(i.op)) return i.rd;
+    if (RT_WRITERS.has(i.op)) return i.rt;
+    if (["jal", "bltzal", "bgezal", "bltzall", "bgezall"].includes(i.op)) return 31;
+    if (i.op === "jalr") return i.rd || 31;
+    return 0;
+}
+
+// FPU arithmetic and VFPU instructions do not read GPRs in generated code
+// (the VFPU interpreter reads the Ctx, which is written back before it runs)
+const noGprRead = (i) => /\.s$|^cvt|^(vfpu|lv|sv|mfv|mtv)/.test(i.op) && i.op !== "lwc1" && i.op !== "swc1";
 const GMEM = 0;  // global: host address of guest address 0
 
 // trap codes passed to the runtime (recomp_trap_code)
@@ -245,6 +265,17 @@ function emitFunction(g, start, size) {
     const c = new Code();
     const looped = labels.size > 0;
     let top = 0;
+
+    // registers this function touches: cached in locals
+    const W = new Set(), U = new Set();
+    for (const i of insns) {
+        const w = written(i);
+        if (w) W.add(w);
+        if (!noGprRead(i)) for (const r of [i.rs, i.rt, i.rd]) if (r) U.add(r);
+    }
+    for (const r of W) U.add(r);
+    const e = new Emitter(g, c, start, end, inside, segIndex, () => top, [...W], [...U]);
+    e.reload();
     if (looped) {
         top = c.open(OP.loop);
         const levels = [];
@@ -263,7 +294,6 @@ function emitFunction(g, start, size) {
         }
     };
     if (looped) beginSegment(start);
-    const e = new Emitter(g, c, start, end, inside, segIndex, () => top);
 
     for (let k = 0; k < insns.length;) {
         const i = insns[k];
@@ -284,7 +314,7 @@ function emitFunction(g, start, size) {
     }
     // fell off the end: continue into the next function
     if (end < prog.textEnd) e.tail(end);
-    else c.op(OP.return);
+    else e.ret();
     if (looped) {
         while (c.depth > 0) c.end();
     }
@@ -292,20 +322,34 @@ function emitFunction(g, start, size) {
 }
 
 class Emitter {
-    constructor(g, c, start, end, inside, segIndex, top) {
-        Object.assign(this, { g, c, start, end, inside, segIndex, top });
+    constructor(g, c, start, end, inside, segIndex, top, W, U) {
+        Object.assign(this, { g, c, start, end, inside, segIndex, top, W, U });
     }
 
     rd(n) {
         if (n === 0) this.c.i32(0);
-        else this.c.get(C).mem(OP.i32_load, R(n), 2);
+        else this.c.get(REG + n - 1);
     }
     // r[n] = value (value() pushes one i32)
     set(n, value) {
         if (n === 0) return;
-        this.c.get(C);
         value();
-        this.c.mem(OP.i32_store, R(n), 2);
+        this.c.set(REG + n - 1);
+    }
+    // cached registers <-> Ctx, around anything that reads or writes the Ctx
+    flush() { for (const n of this.W) this.c.get(C).get(REG + n - 1).mem(OP.i32_store, R(n), 2); }
+    reload() { for (const n of this.U) this.c.get(C).mem(OP.i32_load, R(n), 2).set(REG + n - 1); }
+    // call something that uses the Ctx: push its arguments in args()
+    callOut(fn, args, thenReturn = false) {
+        this.flush();
+        args();
+        this.c.call(fn);
+        if (thenReturn) this.c.op(OP.return);
+        else this.reload();
+    }
+    ret() {
+        this.flush();
+        this.c.op(OP.return);
     }
     ctxLoad(off) { this.c.get(C).mem(OP.i32_load, off, 2); }
     ctxStore(off, value) {
@@ -326,23 +370,21 @@ class Emitter {
     }
     bin(i, opc, a, b) { this.set(i.rd, () => { this.rd(a); this.rd(b); this.c.op(opc); }); }
 
-    trap(i, code) { this.c.get(C).i32(i.addr).i32(code).call(this.g.fTrap); }
+    trap(i, code) { this.callOut(this.g.fTrap, () => this.c.get(C).i32(i.addr).i32(code)); }
 
     goto(target) {  // jump to a label of this function
         if (!this.segIndex.has(target)) return this.tail(target);
         this.c.i32(this.segIndex.get(target)).set(L).br(this.top());
     }
-    callTarget(target) {
-        const { prog, index, stubIndex, fHle, fDispatch } = this.g;
-        if (stubIndex.has(target)) this.c.get(C).i32(stubIndex.get(target)).call(fHle);
-        else if (index.has(target)) this.c.get(C).call(index.get(target));
-        else this.c.get(C).i32(target).call(fDispatch);
-        void prog;
+    callTarget(target, thenReturn = false) {
+        const { index, stubIndex, fHle, fDispatch } = this.g, c = this.c;
+        if (stubIndex.has(target)) this.callOut(fHle, () => c.get(C).i32(stubIndex.get(target)), thenReturn);
+        else if (index.has(target)) this.callOut(index.get(target), () => c.get(C), thenReturn);
+        else this.callOut(fDispatch, () => c.get(C).i32(target), thenReturn);
     }
     tail(target) {
         if (this.inside(target)) return this.goto(target);
-        this.callTarget(target);
-        this.c.op(OP.return);
+        this.callTarget(target, true);
     }
 
     dsBody(ds) {
@@ -376,7 +418,7 @@ class Emitter {
         case "jr": {
             if (i.rs === 31) {
                 doDs();
-                c.op(OP.return);
+                this.ret();
                 return;
             }
             this.rd(i.rs);
@@ -392,7 +434,7 @@ class Emitter {
                 this.goto(a);
                 c.end();
             }
-            c.get(C).get(T).call(this.g.fDispatch).op(OP.return);
+            this.callOut(this.g.fDispatch, () => c.get(C).get(T), true);
             return;
         }
         case "jalr":
@@ -400,7 +442,7 @@ class Emitter {
             c.set(T);
             this.set(i.rd || 31, () => c.i32(i.addr + 8));
             doDs();
-            c.get(C).get(T).call(this.g.fDispatch);
+            this.callOut(this.g.fDispatch, () => c.get(C).get(T));
             return;
         }
         // conditional branches
@@ -582,7 +624,7 @@ class Emitter {
             });
         }
         if (/^(vfpu|lv|sv|mfv|mtv)/.test(i.op)) {
-            c.get(C).i32(i.addr).i32(i.raw).call(this.g.fVfpu);
+            this.callOut(this.g.fVfpu, () => c.get(C).i32(i.addr).i32(i.raw));
             return;
         }
         if (i.op in TRAP) return this.trap(i, TRAP[i.op]);

@@ -78,8 +78,8 @@ if(EMSCRIPTEN)
             --js-library ${CMAKE_SOURCE_DIR}/runtime/web/game_lib.js
             -sEXPORTED_FUNCTIONS=_main,_web_present,_web_frames,_web_time,_web_resize,_hle_call,_vfpu_exec,_recomp_trap_code,_recomp_call_miss,_game_code_ptr,_game_code_len,_game_gmem
             -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=$tkShareGameModule)
-        # the in-browser recompiler and the NID names are served next to the page
-        add_custom_command(TARGET tkdr POST_BUILD
+        # the in-browser recompiler and the NID names are served next to the page (copied on every build)
+        add_custom_target(web_files ALL
             COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/web/recomp ${CMAKE_BINARY_DIR}/recomp
             COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/recomp/nids.json ${CMAKE_BINARY_DIR}/recomp/nids.json
             COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/web/_headers ${CMAKE_BINARY_DIR}/_headers)
