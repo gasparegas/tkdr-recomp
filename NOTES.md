@@ -48,3 +48,21 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
   pointers in data (vtables/callbacks). Case labels are filtered out.
 - 397 indirect `jr`: 388 recognised jump tables (sltiu bound + table in .rodata).
 - 2,232 `jalr` (virtual calls / callbacks) → need a runtime address→function map.
+
+## Debugging aids (environment variables)
+| Variable | Effect |
+|---|---|
+| `HEADLESS=1` | no window; with `RUN_SECONDS=n` exit after n guest seconds |
+| `TIME_SCALE=x`, `TIME_SCALE_UNTIL=s` | run guest time x times faster (until s seconds) |
+| `INPUT="118:START,118.3:"` | scripted buttons at guest times (also as URL params on the web) |
+| `SHOTS=dir` | dump the displayed framebuffer every guest second (PPM) |
+| `AUDIO_DUMP=file.raw` | capture audio output (s16 stereo 44.1 kHz) |
+| `FPS=1` | per-second fps, GPU busy/flush stats |
+| `HLE_LOG=1` | log every system call; `HLE_BT=name` prints the guest call chain at that call |
+| `WATCH=addr,...` | print guest words every second |
+| `TRACE_RA=addr` | log indirect calls made from that return address |
+| `GE_STATS=1` | histogram of primitive/vertex/texture formats |
+| `RASTER_THREADS=n` | rasterizer worker count |
+| `MPEG_DUMP=file` | save the movie stream fed by the game |
+| `RECOMP_PROBE=addr,...` (emit time) | log args/return of those functions; `PROBE_CHAIN=6:84:440` follows pointers |
+| `RECOMP_CHECK=1` (emit time) | report functions that clobber callee-saved registers |
