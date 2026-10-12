@@ -1,7 +1,9 @@
 // sceUtility dialogs: savedata (stored unencrypted under ms0/PSP/SAVEDATA),
 // message dialogs (auto-confirmed, text logged), network dialogs (cancelled).
 #include <stdlib.h>
+#include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "hle.h"
 
@@ -77,6 +79,8 @@ static void write_blob(const char *dir, const char *name, uint32_t ptr, uint32_t
     fclose(f);
 }
 
+void web_persist(void);  // flush ms0 to IndexedDB (no-op natively)
+
 static uint32_t do_save(uint32_t p) {
     char dir[256], file[14] = {0};
     save_dir(p, first_save_name(p), dir, sizeof dir);
@@ -93,6 +97,7 @@ static uint32_t do_save(uint32_t p) {
         fprintf(f, "%s\n%s\n%s\n", (char *)host(p + 0x80), (char *)host(p + 0x100), (char *)host(p + 0x180));
         fclose(f);
     }
+    web_persist();
     return 0;
 }
 
@@ -119,6 +124,97 @@ static uint32_t do_sizes(uint32_t p) {
     return r;
 }
 
+#define SD_ERR_RW_NO_DATA 0x80110327u
+#define SD_ERR_RW_FILE_NOT_FOUND 0x80110329u
+
+static int save_exists(uint32_t p) {
+    char dir[256];
+    struct stat st;
+    save_dir(p, first_save_name(p), dir, sizeof dir);
+    return stat(dir, &st) == 0;
+}
+
+static void write_file_entry(uint32_t e, const char *dir, const char *name) {
+    char path[320];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    memset(host(e), 0, 80);
+    if (stat(path, &st) == 0) {
+        mem_w32(e, 0x21FF);
+        mem_w32(e + 8, (uint32_t)st.st_size);
+    }
+    snprintf((char *)host(e + 64), 16, "%s", name);
+}
+
+// FILES: list the save's files into the caller's arrays
+static uint32_t do_files(uint32_t p) {
+    if (!save_exists(p)) return SD_ERR_RW_NO_DATA;
+    uint32_t info = mem_r32(p + 0x5F8);
+    if (!info) return 0;
+    char dir[256];
+    save_dir(p, first_save_name(p), dir, sizeof dir);
+    uint32_t n_secure = 0, n_system = 0;
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    while (d && (de = readdir(d))) {
+        if (de->d_name[0] == '.' || !strcmp(de->d_name, "TITLE.TXT")) continue;
+        int system = !strcmp(de->d_name, "PARAM.SFO") || !strncmp(de->d_name, "ICON", 4) ||
+                     !strncmp(de->d_name, "PIC", 3) || !strncmp(de->d_name, "SND", 3);
+        // the game's own data files are written "secure" (encrypted) on a PSP
+        uint32_t *count = system ? &n_system : &n_secure;
+        uint32_t max = mem_r32(info + (system ? 8 : 0)), arr = mem_r32(info + (system ? 32 : 24));
+        if (*count < max && arr) write_file_entry(arr + *count * 80, dir, de->d_name);
+        (*count)++;
+    }
+    if (d) closedir(d);
+    mem_w32(info + 12, n_secure);
+    mem_w32(info + 16, 0);
+    mem_w32(info + 20, n_system);
+    return 0;
+}
+
+// GETSIZE: free space, and how much is *missing* (0: everything fits)
+static uint32_t do_getsize(uint32_t p) {
+    uint32_t si = mem_r32(p + 0x5FC);
+    if (si) {
+        mem_w32(si + 16, 32768);  // sector size
+        mem_w32(si + 20, 30000);  // free sectors
+        mem_w32(si + 24, 30000 * 32);  // free KB
+        snprintf((char *)host(si + 28), 8, "%u MB", 30000u * 32 / 1024);
+        mem_w32(si + 36, 0);  // needed KB
+        mem_w32(si + 48, 0);  // needed to overwrite KB
+    }
+    return save_exists(p) ? 0 : SD_ERR_RW_NO_DATA;
+}
+
+static uint32_t do_read(uint32_t p) {
+    if (!save_exists(p)) return SD_ERR_RW_NO_DATA;
+    return do_load(p) ? SD_ERR_RW_FILE_NOT_FOUND : 0;
+}
+
+static uint32_t do_erase(uint32_t p, int whole) {
+    char dir[256], path[320], file[14] = {0};
+    save_dir(p, first_save_name(p), dir, sizeof dir);
+    if (!save_exists(p)) return SD_ERR_RW_NO_DATA;
+    if (whole) {
+        DIR *d = opendir(dir);
+        struct dirent *de;
+        while (d && (de = readdir(d)))
+            if (de->d_name[0] != '.') {
+                snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+                unlink(path);
+            }
+        if (d) closedir(d);
+        rmdir(dir);
+    } else {
+        memcpy(file, host(p + 0x64), 13);
+        snprintf(path, sizeof path, "%s/%s", dir, file);
+        if (unlink(path)) return SD_ERR_RW_FILE_NOT_FOUND;
+    }
+    web_persist();
+    return 0;
+}
+
 static void savedata_run(uint32_t p) {
     uint32_t mode = mem_r32(p + 0x30), r;
     char game[14] = {0}, name[21] = {0}, file[14] = {0};
@@ -129,9 +225,15 @@ static void savedata_run(uint32_t p) {
     case 0: case 2: case 4: r = do_load(p); break;  // (auto/list) load
     case 1: case 3: case 5: r = do_save(p); break;  // (auto/list) save
     case 8: r = do_sizes(p); break;
+    case 12: r = do_files(p); break;
+    case 13: case 14: case 17: case 18: r = do_save(p); break;  // make / write data
+    case 15: case 16: r = do_read(p); break;  // read data
+    case 19: case 20: r = do_erase(p, 0); break;
+    case 10: case 21: r = do_erase(p, 1); break;
+    case 22: r = do_getsize(p); break;
     default: r = 0; break;
     }
-    fprintf(stderr, "savedata: mode %u %s%s/%s -> %08X\n", mode, game, name, file, r);
+    fprintf(stderr, "savedata: mode %u %s%s/%s -> %08X (size %u)\n", mode, game, name, file, r, mem_r32(p + 0x7C));
     mem_w32(p + 0x1C, r);
 }
 

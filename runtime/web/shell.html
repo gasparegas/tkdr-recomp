@@ -26,6 +26,13 @@
   var statusEl = document.getElementById('status');
   var Module = {
     canvas: document.getElementById('canvas'),
+    // save data: /ms0 is kept in IndexedDB; main() waits until it is loaded
+    preRun: [function () {
+      FS.mkdir('/ms0');
+      FS.mount(IDBFS, {}, '/ms0');
+      addRunDependency('ms0');
+      FS.syncfs(true, function () { removeRunDependency('ms0'); });
+    }],
     print: function (t) { console.log(t); },
     printErr: function (t) { console.warn(t); statusEl.textContent = t; },
     setStatus: function (t) { if (t) statusEl.textContent = t; },
@@ -34,12 +41,12 @@
   var isoUrl = new URLSearchParams(location.search).get('iso');
   if (isoUrl) {
     Module.isoUrl = isoUrl;
-    Module.preRun = [function () {
+    Module.preRun.push(function () {
       // pass other query parameters (INPUT, TIME_SCALE, ...) as environment variables
       new URLSearchParams(location.search).forEach(function (v, k) { if (k !== 'iso') ENV[k] = v; });
       document.getElementById('pick').style.display = 'none';
       statusEl.textContent = 'starting from ' + isoUrl + '…';
-    }];
+    });
     Module.onRuntimeInitialized = function () { Module.callMain([]); };
   }
   document.getElementById('iso').addEventListener('change', function (e) {

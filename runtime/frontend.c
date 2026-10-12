@@ -1,6 +1,7 @@
 // SDL2 frontend: shows the PSP framebuffer, maps the keyboard to buttons.
 #include <SDL.h>
 #include <stdio.h>
+#include <stdlib.h>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -57,6 +58,50 @@ void frontend_scanout(uint32_t *out) {
         }
 }
 
+// Gamepad: buttons with the PSP's face-button layout; the left stick also
+// drives the d-pad (Tekken is played on the d-pad).
+static uint32_t g_pad_buttons;
+extern uint8_t g_analog_x, g_analog_y;
+
+static uint32_t pad_button(int b) {
+    switch (b) {
+    case SDL_CONTROLLER_BUTTON_A: return PSP_CROSS;
+    case SDL_CONTROLLER_BUTTON_B: return PSP_CIRCLE;
+    case SDL_CONTROLLER_BUTTON_X: return PSP_SQUARE;
+    case SDL_CONTROLLER_BUTTON_Y: return PSP_TRIANGLE;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return PSP_LTRIGGER;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return PSP_RTRIGGER;
+    case SDL_CONTROLLER_BUTTON_BACK: return PSP_SELECT;
+    case SDL_CONTROLLER_BUTTON_START: return PSP_START;
+    case SDL_CONTROLLER_BUTTON_DPAD_UP: return PSP_UP;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return PSP_DOWN;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return PSP_LEFT;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return PSP_RIGHT;
+    default: return 0;
+    }
+}
+
+static uint32_t g_stick_buttons, g_key_buttons;
+
+static void stick(int axis, int value) {
+    const int dead = 12000;
+    if (axis == SDL_CONTROLLER_AXIS_LEFTX) {
+        g_analog_x = (uint8_t)((value + 32768) >> 8);
+        g_stick_buttons &= ~(uint32_t)(PSP_LEFT | PSP_RIGHT);
+        if (value < -dead) g_stick_buttons |= PSP_LEFT;
+        if (value > dead) g_stick_buttons |= PSP_RIGHT;
+    } else if (axis == SDL_CONTROLLER_AXIS_LEFTY) {
+        g_analog_y = (uint8_t)((value + 32768) >> 8);
+        g_stick_buttons &= ~(uint32_t)(PSP_UP | PSP_DOWN);
+        if (value < -dead) g_stick_buttons |= PSP_UP;
+        if (value > dead) g_stick_buttons |= PSP_DOWN;
+    } else if (axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
+        uint32_t b = axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? PSP_LTRIGGER : PSP_RTRIGGER;
+        if (value > 16000) g_stick_buttons |= b;
+        else g_stick_buttons &= ~b;
+    }
+}
+
 void audio_pull(int16_t *out, int frames);
 
 static void audio_cb(void *ud, Uint8 *stream, int len) {
@@ -80,11 +125,22 @@ static void frame(void) {
             if (e.type == SDL_QUIT) exit(0);
             if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
                 uint32_t b = key_to_button(e.key.keysym.sym);
-                if (e.type == SDL_KEYDOWN) g_buttons |= b;
-                else g_buttons &= ~b;
+                if (e.type == SDL_KEYDOWN) g_key_buttons |= b;
+                else g_key_buttons &= ~b;
+#ifndef __EMSCRIPTEN__
                 if (e.key.keysym.sym == SDLK_ESCAPE) exit(0);
+#endif
+            } else if (e.type == SDL_CONTROLLERDEVICEADDED) {
+                SDL_GameControllerOpen(e.cdevice.which);
+            } else if (e.type == SDL_CONTROLLERBUTTONDOWN) {
+                g_pad_buttons |= pad_button(e.cbutton.button);
+            } else if (e.type == SDL_CONTROLLERBUTTONUP) {
+                g_pad_buttons &= ~pad_button(e.cbutton.button);
+            } else if (e.type == SDL_CONTROLLERAXISMOTION) {
+                stick(e.caxis.axis, e.caxis.value);
             }
         }
+        if (!getenv("INPUT")) g_buttons = g_key_buttons | g_pad_buttons | g_stick_buttons;
         frontend_scanout(pixels);
         SDL_UpdateTexture(tex, NULL, pixels, 480 * 4);
         SDL_RenderClear(ren);
@@ -117,7 +173,7 @@ EMSCRIPTEN_KEEPALIVE uint32_t web_frames(void) {
 #endif
 
 void frontend_run(void) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO)) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return;
     }

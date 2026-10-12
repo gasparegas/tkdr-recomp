@@ -20,7 +20,7 @@ set_target_properties(at3 PROPERTIES CXX_STANDARD 17)
 if(EMSCRIPTEN)
     target_compile_options(at3 PRIVATE -pthread)
 endif()
-add_executable(tkdr runtime/main.c runtime/vfpu.c runtime/frontend.c ${HLE_SOURCES} ${GENERATED_SOURCES})
+add_executable(tkdr runtime/main.c runtime/vfpu.c runtime/frontend.c runtime/web/web.c ${HLE_SOURCES} ${GENERATED_SOURCES})
 target_include_directories(tkdr PRIVATE runtime ${GEN_DIR})
 target_link_libraries(tkdr PRIVATE at3)
 # minimal FFmpeg (H.264 only), built by tools/build_ffmpeg.sh
@@ -36,14 +36,13 @@ target_compile_options(tkdr PRIVATE -fwrapv -fno-strict-aliasing -Wno-unused-lab
                        -Wno-unused-variable -Wno-parentheses-equality -Wno-tautological-compare)
 if(EMSCRIPTEN)
     # Browser build: pthreads = Web Workers on a shared heap (needs COOP/COEP headers)
-    target_sources(tkdr PRIVATE runtime/web/web.c)
     target_compile_options(tkdr PRIVATE -pthread -sUSE_SDL=2)
     target_link_options(tkdr PRIVATE
         -pthread -sUSE_SDL=2
         -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=768MB
         -sSTACK_SIZE=1MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB
-        -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV -sEXPORTED_FUNCTIONS=_main,_web_present,_web_frames,_web_time
-        -sENVIRONMENT=web,worker
+        -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV,FS,IDBFS,addRunDependency,removeRunDependency -sEXPORTED_FUNCTIONS=_main,_web_present,_web_frames,_web_time
+        -sENVIRONMENT=web,worker -lidbfs.js -sFORCE_FILESYSTEM=1
         --preload-file ${GEN_DIR}/image.bin@image.bin
         --shell-file ${CMAKE_SOURCE_DIR}/runtime/web/shell.html)
     set_target_properties(tkdr PROPERTIES SUFFIX ".html")

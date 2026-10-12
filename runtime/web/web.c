@@ -73,4 +73,15 @@ int web_iso_read(uint64_t off, void *buf, size_t n) {
     pthread_mutex_unlock(&g_lock);
     return 0;
 }
+
+// Save data lives in /ms0, an IndexedDB-backed directory mounted by the page.
+void web_persist(void) {
+    MAIN_THREAD_ASYNC_EM_ASM({
+        FS.syncfs(false, function(err) {
+            if (err) console.warn('saving to IndexedDB failed', err);
+        });
+    });
+}
+#else
+void web_persist(void) {}
 #endif
