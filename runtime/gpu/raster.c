@@ -15,6 +15,7 @@
 #define R(reg_) (g_ge.cmd[reg_])
 
 static uint32_t g_prims;
+uint32_t g_flush_reason[5];  // stats: list end, texture, transfer, targets full, state wrap
 uint32_t gpu_stat_prims(void) {
     uint32_t n = g_prims;
     g_prims = 0;
@@ -521,6 +522,37 @@ static uint32_t tex_bytes(const TexState *t) {
 
 void raster_flush(void);
 
+// Framebuffer ranges that queued (not yet drawn) primitives write to. A
+// texture only needs the queue drained if it reads from one of them.
+#define MAX_PENDING_TARGETS 8
+static struct { uint32_t lo, hi; } g_pending_targets[MAX_PENDING_TARGETS];
+static int g_n_pending_targets;
+
+static void note_target(uint32_t lo, uint32_t hi) {
+    lo &= 0x1FFFFFFF;
+    hi &= 0x1FFFFFFF;
+    for (int k = 0; k < g_n_pending_targets; k++)
+        if (g_pending_targets[k].lo == lo && g_pending_targets[k].hi == hi) return;
+    if (g_n_pending_targets == MAX_PENDING_TARGETS) {
+        g_flush_reason[3]++;
+        raster_flush();
+    }
+    g_pending_targets[g_n_pending_targets].lo = lo;
+    g_pending_targets[g_n_pending_targets].hi = hi;
+    g_n_pending_targets++;
+}
+
+static void flush_if_rendering_to(uint32_t lo, uint32_t hi) {
+    lo &= 0x1FFFFFFF;
+    hi &= 0x1FFFFFFF;
+    for (int k = 0; k < g_n_pending_targets; k++)
+        if (lo < g_pending_targets[k].hi && g_pending_targets[k].lo < hi) {
+            g_flush_reason[1]++;
+            raster_flush();
+            return;
+        }
+}
+
 static void tex_cache_lookup(TexState *t) {
     uint32_t key_fmt = (uint32_t)t->fmt | (uint32_t)t->swizzle << 8 | (uint32_t)t->stride << 16;
     uint32_t key_size = (uint32_t)t->w | (uint32_t)t->h << 16;
@@ -536,8 +568,8 @@ static void tex_cache_lookup(TexState *t) {
         t->pix = e->pix;
         return;
     }
-    raster_flush();  // the source may be a render target still being drawn
     uint32_t n = tex_bytes(t);
+    flush_if_rendering_to(t->addr, t->addr + n);  // the source may still be being drawn
     uint64_t h = (t->addr & 0x1FFFFFFF) + n <= GUEST_MEM_SIZE ? hash_bytes(host(t->addr), n) : 0;
     if (same_key && e->data_hash == h) {
         e->gen = g_tex_gen;
@@ -656,13 +688,13 @@ static inline float clamp255(float v) { return v < 0.f ? 0.f : v > 255.f ? 255.f
 // all of them, but only on its own rows (8-row bands, interleaved).
 static int g_nbands = 1;
 static __thread int tl_band;
-static inline int owns_row(int y) { return g_nbands == 1 || ((y >> 3) % g_nbands) == tl_band; }
+// `band` is read from tl_band once per primitive: thread-locals are slow on some platforms
+static inline int owns_row(int y, int band) { return g_nbands == 1 || ((y >> 3) % g_nbands) == band; }
 
 // Shade one pixel. col: interpolated vertex color; uv in texels.
 static void shade(const PixState *p, int x, int y, float z, const float *col, float u, float v) {
     const Target *t = &p->tg;
     if (x < t->sx1 || x > t->sx2 || y < t->sy1 || y > t->sy2 || x < 0 || y < 0 || x >= 1024 || y >= 1024) return;
-    if (!owns_row(y)) return;
     uint32_t za = t->zb + (uint32_t)(y * (int)t->zb_stride + x) * 2;
     int zi = (int)(z < 0.f ? 0.f : z > 65535.f ? 65535.f : z);
 
@@ -771,8 +803,9 @@ static void draw_triangle(const PixState *p, const SVtx *v0, const SVtx *v1, con
     int persp = !p->through;
     float flat_col[4];
     for (int i = 0; i < 4; i++) flat_col[i] = v2->c[i] / v2->iw;
+    int band = tl_band;
     for (int y = y0; y <= y1; y++, r0 += e0y, r1 += e1y, r2 += e2y) {
-        if (!owns_row(y)) continue;
+        if (!owns_row(y, band)) continue;
         // span of this row where all three weights are >= 0 (w = r + e*(x - x0))
         float lo = 0.f, hi = (float)(x1 - x0);
         const float rr[3] = {r0, r1, r2}, ee[3] = {e0x, e1x, e2x};
@@ -811,8 +844,9 @@ static void draw_rect(const PixState *p, const SVtx *a, const SVtx *b) {
     float du = (b->u - a->u) / (b->x - a->x ? b->x - a->x : 1.f);
     float dv = (b->v - a->v) / (b->y - a->y ? b->y - a->y : 1.f);
     float tw = (float)p->tex.w, th = (float)p->tex.h;
+    int band = tl_band;
     for (int y = iy0; y < iy1; y++) {
-        if (!owns_row(y)) continue;
+        if (!owns_row(y, band)) continue;
         for (int x = ix0; x < ix1; x++) {
             float u = a->u + ((float)x + 0.5f - a->x) * du, v = a->v + ((float)y + 0.5f - a->y) * dv;
             if (!p->through) {
@@ -830,7 +864,8 @@ static void draw_line(const PixState *p, const SVtx *a, const SVtx *b) {
     for (int i = 0; i <= n; i++) {
         float t = n ? (float)i / (float)n : 0.f, col[4];
         for (int k = 0; k < 4; k++) col[k] = (a->c[k] / a->iw) * (1 - t) + (b->c[k] / b->iw) * t;
-        shade(p, (int)(a->x + dx * t), (int)(a->y + dy * t), a->z + (b->z - a->z) * t, col, a->u, a->v);
+        int py = (int)(a->y + dy * t);
+        if (owns_row(py, tl_band)) shade(p, (int)(a->x + dx * t), py, a->z + (b->z - a->z) * t, col, a->u, a->v);
     }
 }
 
@@ -844,12 +879,13 @@ typedef struct {
 } Job;
 
 #define NJOBS 16384
-#define NSTATES 1024
+#define NSTATES 8192
 #define MAX_WORKERS 16
 static Job g_jobs[NJOBS];
 static PixState g_states[NSTATES];
 static int g_state_next;
 static uint64_t g_job_w, g_job_r[MAX_WORKERS];
+static uint64_t g_job_pending, g_job_r_min_cache;  // producer side (GPU thread only)
 static int g_nworkers;
 static pthread_mutex_t g_q_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_q_work = PTHREAD_COND_INITIALIZER, g_q_done = PTHREAD_COND_INITIALIZER;
@@ -865,7 +901,8 @@ static void run_job(const Job *j) {
     default: {
         float col[4];
         for (int k = 0; k < 4; k++) col[k] = j->v[0].c[k] / j->v[0].iw;
-        shade(p, (int)j->v[0].x, (int)j->v[0].y, j->v[0].z, col, j->v[0].u, j->v[0].v);
+        if (owns_row((int)j->v[0].y, tl_band))
+            shade(p, (int)j->v[0].x, (int)j->v[0].y, j->v[0].z, col, j->v[0].u, j->v[0].v);
     }
     }
 }
@@ -893,12 +930,21 @@ static uint64_t min_read(void) {
     return m;
 }
 
+static void kick(void);
+
 // Wait until every queued primitive has been drawn.
+uint64_t g_flush_wait_us, g_prim_us;  // stats
+uint64_t hle_time_us(void);
+
 void raster_flush(void) {
     if (!g_nworkers) return;
+    kick();
+    uint64_t t0 = hle_time_us();
     pthread_mutex_lock(&g_q_lock);
     while (min_read() != g_job_w) pthread_cond_wait(&g_q_done, &g_q_lock);
     pthread_mutex_unlock(&g_q_lock);
+    g_n_pending_targets = 0;
+    g_flush_wait_us += hle_time_us() - t0;
 }
 
 static void raster_init(void) {
@@ -924,7 +970,16 @@ static void raster_init(void) {
 static void begin_state(const PixState *ps) {
     g_cur_ps = ps;
     if (!g_nworkers) return;
+    {
+        const Target *t = &ps->tg;
+        uint32_t bpp = t->fb_fmt == 3 ? 4 : 2, rows = (uint32_t)t->sy2 + 1;
+        note_target(t->fb, t->fb + t->fb_stride * rows * bpp);
+        if (ps->z_test || ps->clear_depth) note_target(t->zb, t->zb + t->zb_stride * rows * 2);
+    }
+    // consecutive primitives usually share their state: reuse the last snapshot
+    if (g_cur_state >= 0 && !memcmp(&g_states[g_cur_state], ps, sizeof *ps)) return;
     if (g_state_next == NSTATES) {  // wrapping: states still referenced must be done
+        g_flush_reason[4]++;
         raster_flush();
         g_state_next = 0;
     }
@@ -950,24 +1005,32 @@ static void submit(int kind, const SVtx *a, const SVtx *b, const SVtx *c, int fl
         }
         return;
     }
-    pthread_mutex_lock(&g_q_lock);
-    while (g_job_w - min_read() >= NJOBS) pthread_cond_wait(&g_q_done, &g_q_lock);
-    Job *j = &g_jobs[g_job_w % NJOBS];
+    // Jobs are written past the published end without the lock and made
+    // visible in batches by kick(); only a full ring makes us wait.
+    if (g_job_pending - g_job_r_min_cache >= NJOBS) {
+        pthread_mutex_lock(&g_q_lock);
+        g_job_w = g_job_pending;  // publish what we have so workers can drain
+        pthread_cond_broadcast(&g_q_work);
+        while (g_job_pending - min_read() >= NJOBS) pthread_cond_wait(&g_q_done, &g_q_lock);
+        g_job_r_min_cache = min_read();
+        pthread_mutex_unlock(&g_q_lock);
+    }
+    Job *j = &g_jobs[g_job_pending % NJOBS];
     j->kind = (uint8_t)kind;
     j->flat = (uint8_t)flat;
     j->state = (uint16_t)g_cur_state;
     j->v[0] = *a;
     if (b) j->v[1] = *b;
     if (c) j->v[2] = *c;
-    g_job_w++;
-    if ((g_job_w & 15) == 0) pthread_cond_broadcast(&g_q_work);  // wake in batches
-    pthread_mutex_unlock(&g_q_lock);
+    g_job_pending++;
 }
 
 // Make queued work visible to the workers (end of a primitive batch).
 static void kick(void) {
-    if (!g_nworkers) return;
+    if (!g_nworkers || g_job_pending == g_job_w) return;
     pthread_mutex_lock(&g_q_lock);
+    g_job_w = g_job_pending;
+    g_job_r_min_cache = min_read();
     pthread_cond_broadcast(&g_q_work);
     pthread_mutex_unlock(&g_q_lock);
 }
@@ -1018,7 +1081,14 @@ static void emit_triangle(const PixState *p, const Vtx *a, const Vtx *b, const V
 #define MAX_VERTS 65536
 static Vtx g_verts[MAX_VERTS];
 
+static void draw_prim(int prim, int count);
 void gpu_draw_prim(int prim, int count) {
+    uint64_t t0 = hle_time_us();
+    draw_prim(prim, count);
+    g_prim_us += hle_time_us() - t0;
+}
+
+static void draw_prim(int prim, int count) {
     g_prims++;
     if (count <= 0) return;
     if (count > MAX_VERTS) count = MAX_VERTS;
@@ -1088,6 +1158,7 @@ void gpu_draw_prim(int prim, int count) {
 
 // Copy a rectangle between two VRAM/RAM surfaces (GE_TRANSFERSTART).
 void gpu_block_transfer(void) {
+    g_flush_reason[2]++;
     raster_flush();
     const uint32_t *r = g_ge.cmd;
     uint32_t src = (r[GE_TRANSFERSRC] & 0xFFFFF0u) | ((r[GE_TRANSFERSRCW] & 0xFF0000u) << 8);

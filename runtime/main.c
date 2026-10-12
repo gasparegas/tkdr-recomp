@@ -232,12 +232,21 @@ int main(int argc, char **argv) {
             if (getenv("FPS")) {
                 extern uint32_t g_frames_presented;
                 static uint32_t last_frames;
-                extern uint64_t g_gpu_busy_us, g_idle_us;
-                static uint64_t last_gpu, last_idle;
-                fprintf(stderr, "t=%d fps=%u gpu=%llums idle=%llums\n", t, g_frames_presented - last_frames,
-                        (unsigned long long)(g_gpu_busy_us - last_gpu) / 1000, (unsigned long long)(g_idle_us - last_idle) / 1000);
+                extern uint64_t g_gpu_busy_us, g_idle_us, g_flush_wait_us, g_prim_us;
+                static uint64_t last_gpu, last_idle, last_flush, last_prim;
+                fprintf(stderr, "t=%d fps=%u gpu=%llums (prims %llums, flush wait %llums) idle=%llums\n", t,
+                        g_frames_presented - last_frames, (unsigned long long)(g_gpu_busy_us - last_gpu) / 1000,
+                        (unsigned long long)(g_prim_us - last_prim) / 1000,
+                        (unsigned long long)(g_flush_wait_us - last_flush) / 1000,
+                        (unsigned long long)(g_idle_us - last_idle) / 1000);
                 last_gpu = g_gpu_busy_us;
                 last_idle = g_idle_us;
+                last_flush = g_flush_wait_us;
+                last_prim = g_prim_us;
+                extern uint32_t g_flush_reason[5];
+                fprintf(stderr, "  flushes: list %u tex %u xfer %u targets %u states %u\n", g_flush_reason[0],
+                        g_flush_reason[1], g_flush_reason[2], g_flush_reason[3], g_flush_reason[4]);
+                memset(g_flush_reason, 0, sizeof g_flush_reason);
                 last_frames = g_frames_presented;
             }
             if (!watch) continue;

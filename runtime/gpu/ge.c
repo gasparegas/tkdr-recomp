@@ -222,7 +222,8 @@ static void *gpu_thread(void *arg) {
         pthread_mutex_unlock(&g_lock);
         uint64_t t0 = hle_time_us();
         int done = run_list(l);
-        if (done) raster_flush();  // the list is complete only once its pixels are
+        extern uint32_t g_flush_reason[5];
+        if (done) { g_flush_reason[0]++; raster_flush(); }  // the list is complete only once its pixels are
         g_gpu_busy_us += hle_time_us() - t0;
         pthread_mutex_lock(&g_lock);
         if (done) {
