@@ -73,3 +73,23 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
 | `MPEG_DUMP=file` | save the movie stream fed by the game |
 | `RECOMP_PROBE=addr,...` (emit time) | log args/return of those functions; `PROBE_CHAIN=6:84:440` follows pointers |
 | `RECOMP_CHECK=1` (emit time) | report functions that clobber callee-saved registers |
+
+## Hostable web build (RECOMP_DYNAMIC)
+
+- `web/recomp/*.mjs` port `recomp/*.py` (identical analysis: same functions,
+  jump tables, labels, relocations) and `wasmgen.mjs` emits one wasm function
+  per guest function instead of C. Registers stay in the `Ctx` struct in shared
+  memory; guest memory is `g_mem` (imported global `gmem`). Functions with
+  labels are a `loop` around one `block` per segment, entered with `br_table`
+  on a segment number (a jump sets it and restarts the loop).
+- The module imports `hle_call`, `vfpu_exec`, `recomp_trap_code`,
+  `recomp_call_miss` from the runtime and exports `dispatch(ctx, addr)` (binary
+  search over function starts). The runtime calls it through `game_dispatch`
+  (`runtime/web/game_lib.js`), which instantiates the module once per thread
+  (every PSP thread is a Web Worker); the page compiles it once and posts it
+  to the workers.
+- The page writes `/game/game.txt`, `/game/image.bin`, `/game/code.wasm` before
+  `main()`. Translations are cached in IndexedDB under EBOOT sha1 + a hash of the
+  recompiler sources.
+- Local test: `python3 tools/serve.py build/web-host 8082 --iso game/tekken_dr.iso
+  --eboot game/tkpsp.elf`, open `/tkdr.html?iso=/game.iso&eboot=/eboot.bin`.

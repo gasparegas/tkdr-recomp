@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Serve the web build with the COOP/COEP headers wasm threads need.
 
-usage: serve.py DIR [PORT] [--iso PATH]   (--iso exposes PATH at /game.iso, with Range support)
+usage: serve.py DIR [PORT] [--iso PATH] [--eboot PATH]
+  --iso exposes PATH at /game.iso (with Range support), --eboot at /eboot.bin:
+  local testing only (?iso=/game.iso&eboot=/eboot.bin), never put these online.
 """
 import http.server
 import os
 import sys
 
 ISO = None
+EBOOT = None
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
+                      ".mjs": "text/javascript", ".js": "text/javascript", ".wasm": "application/wasm"}
+
     def end_headers(self):
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
@@ -20,6 +26,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if ISO and self.path.split("?")[0] == "/game.iso":
             return self.send_iso()
+        if EBOOT and self.path.split("?")[0] == "/eboot.bin":
+            data = open(EBOOT, "rb").read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         return super().do_GET()
 
     def send_iso(self):
@@ -51,6 +65,10 @@ if __name__ == "__main__":
     if "--iso" in args:
         i = args.index("--iso")
         ISO = os.path.abspath(args[i + 1])
+        del args[i:i + 2]
+    if "--eboot" in args:
+        i = args.index("--eboot")
+        EBOOT = os.path.abspath(args[i + 1])
         del args[i:i + 2]
     directory = args[0] if args else "."
     port = int(args[1]) if len(args) > 1 else 8080

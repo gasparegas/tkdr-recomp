@@ -47,6 +47,24 @@ The script verifies the decrypted executable (it must be exactly the supported
 version), translates it to C, builds a minimal FFmpeg (H.264 decoder only) and
 compiles the targets you asked for.
 
+## Hosting the browser version
+
+```sh
+tools/build.sh --web-host
+```
+
+needs no game files and produces `build/web-host/`: `tkdr.html`, `tkdr.js`,
+`tkdr.wasm`, `recomp/` and `_headers`. **Nothing from the game is in it**, so this
+folder is what can be put online (any static host that sends the COOP/COEP
+headers in `_headers`, e.g. Cloudflare Pages or Netlify).
+
+Each player picks their own ISO and their own decrypted EBOOT on the page. The
+EBOOT is translated into WebAssembly **in their browser** (`web/recomp/`, a
+JavaScript port of the recompiler that writes wasm directly), once, then kept
+in that browser's storage. Files never leave the device.
+
+Never host `build/web/` or `build/native/`: those contain the translated game.
+
 ## Run
 
 Native:
@@ -113,6 +131,8 @@ ad-hoc multiplayer.
   threads, HLE of the system libraries, a VFPU interpreter, a multi-threaded
   software rasterizer for the GE, SAS/ATRAC3+/H.264 audio and video, and an SDL2
   frontend that also builds with Emscripten.
+- `web/recomp/`: the same recompiler in JavaScript, emitting WebAssembly
+  directly, for the hostable browser build (`RECOMP_DYNAMIC`).
 - `tools/`: build helpers, ISO/CSO tools and a local web server.
 
 Debugging aids are described in `NOTES.md`.

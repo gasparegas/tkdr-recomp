@@ -1,0 +1,4 @@
+# Cloudflare Pages / Netlify: wasm threads need a cross-origin isolated page
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp

@@ -9,8 +9,63 @@
 #include "func_table.h"
 #include "gpu/gpu.h"
 #include "hle/hle.h"
-#include "image_base.h"
 #include "recomp.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#else
+#define EMSCRIPTEN_KEEPALIVE
+#endif
+
+#ifdef RECOMP_DYNAMIC
+// Hostable web build: no game code inside. The page recompiles the player's
+// EBOOT in the browser (web/recomp) and leaves in the virtual FS:
+//   /game/game.txt   "base size entry nimports" then "stub lib name nid" per import
+//   /game/image.bin  the relocated executable image
+//   /game/code.wasm  the generated module, called through game_dispatch (game_lib.js)
+uint32_t g_image_base, g_image_size, g_entry;
+ImportEntry *g_imports;
+unsigned g_import_count;
+#define IMAGE_BASE g_image_base
+#define IMAGE_SIZE g_image_size
+static uint8_t *g_game_code;
+static uint32_t g_game_code_len;
+EMSCRIPTEN_KEEPALIVE uint32_t game_code_ptr(void) { return (uint32_t)(uintptr_t)g_game_code; }
+EMSCRIPTEN_KEEPALIVE uint32_t game_code_len(void) { return g_game_code_len; }
+EMSCRIPTEN_KEEPALIVE uint32_t game_gmem(void) { return (uint32_t)(uintptr_t)g_mem; }
+
+static void load_game(void) {
+    FILE *f = fopen("/game/game.txt", "r");
+    unsigned n = 0;
+    if (!f || fscanf(f, "%x %x %x %u", &g_image_base, &g_image_size, &g_entry, &n) != 4) {
+        fprintf(stderr, "/game/game.txt missing or invalid\n");
+        exit(1);
+    }
+    g_imports = calloc(n, sizeof *g_imports);
+    for (unsigned k = 0; k < n; k++) {
+        char lib[64], name[96];
+        unsigned stub, nid;
+        if (fscanf(f, "%x %63s %95s %x", &stub, lib, name, &nid) != 4) break;
+        g_imports[k] = (ImportEntry){strdup(lib), strdup(name), nid, stub};
+        g_import_count = k + 1;
+    }
+    fclose(f);
+    f = fopen("/game/code.wasm", "rb");
+    if (!f) {
+        fprintf(stderr, "/game/code.wasm missing\n");
+        exit(1);
+    }
+    fseek(f, 0, SEEK_END);
+    g_game_code_len = (uint32_t)ftell(f);
+    fseek(f, 0, SEEK_SET);
+    g_game_code = malloc(g_game_code_len);
+    if (fread(g_game_code, 1, g_game_code_len, f) != g_game_code_len) exit(1);
+    fclose(f);
+}
+
+void game_dispatch(Ctx *c, uint32_t addr);  // runtime/web/game_lib.js
+#else
+#include "image_base.h"
+#endif
 
 void hle_init(void);
 void io_init(const char *iso_path, const char *ms_root);
@@ -80,6 +135,7 @@ static void save_shot(const char *dir, int n) {
 
 uint8_t *g_mem;
 
+#ifndef RECOMP_DYNAMIC
 static RecompFunc find_func(uint32_t addr) {
     addr &= 0x1FFFFFFFu;
     unsigned lo = 0, hi = g_func_count;
@@ -90,15 +146,36 @@ static RecompFunc find_func(uint32_t addr) {
     }
     return lo < g_func_count && g_funcs[lo].addr == addr ? g_funcs[lo].fn : NULL;
 }
+#endif
 
 void recomp_trap(Ctx *c, uint32_t pc, const char *why) {
     fprintf(stderr, "TRAP at %08X: %s (ra=%08X sp=%08X)\n", pc, why, c->r[31], c->r[29]);
     exit(1);
 }
 
+// Trap raised by generated wasm code (web/recomp/wasmgen.mjs TRAP).
+EMSCRIPTEN_KEEPALIVE void recomp_trap_code(Ctx *c, uint32_t pc, uint32_t code) {
+    static const char *names[] = {"?", "syscall", "break", "halt", "cop0", "undecoded instruction",
+                                  "unsupported instruction", "branch in delay slot"};
+    recomp_trap(c, pc, code < sizeof names / sizeof names[0] ? names[code] : "?");
+}
+
+// An indirect call that is not a known function: an import stub, or a bug.
+EMSCRIPTEN_KEEPALIVE void recomp_call_miss(Ctx *c, uint32_t addr) {
+    for (unsigned k = 0; k < g_import_count; k++)
+        if (g_imports[k].stub == (addr & 0x1FFFFFFFu)) {
+            hle_call(c, k);
+            return;
+        }
+    recomp_trap(c, addr, "indirect call to unknown address");
+}
+
 static uint32_t g_trace_ra;  // TRACE_RA=0x...: log indirect calls made from there
 
 void call_indirect(Ctx *c, uint32_t addr) {
+#ifdef RECOMP_DYNAMIC
+    game_dispatch(c, addr);
+#else
     RecompFunc fn = find_func(addr);
     if (fn) {
         uint32_t ra = c->r[31];
@@ -107,12 +184,8 @@ void call_indirect(Ctx *c, uint32_t addr) {
             fprintf(stderr, "trace: call %08X from %08X -> v0=%08X f0=%g\n", addr, ra, c->r[2], c->f[0].f);
         return;
     }
-    for (unsigned k = 0; k < g_import_count; k++)
-        if (g_imports[k].stub == (addr & 0x1FFFFFFFu)) {
-            hle_call(c, k);
-            return;
-        }
-    recomp_trap(c, addr, "indirect call to unknown address");
+    recomp_call_miss(c, addr);
+#endif
 }
 
 void recomp_probe(Ctx *c, uint32_t func) {
@@ -192,7 +265,12 @@ int main(int argc, char **argv) {
 #ifdef __EMSCRIPTEN__
     (void)argc;
     (void)argv;
+#ifdef RECOMP_DYNAMIC
+    load_game();
+    load_image("/game/image.bin");
+#else
     load_image("image.bin");  // preloaded into the virtual FS; the ISO comes from the page
+#endif
     io_init(NULL, "ms0");
 #else
     // GE_REPLAY=capture.bin [GE_REPLAY_ITERS=n] [GE_REPLAY_OUT=out.ppm]: draw a captured frame offline
