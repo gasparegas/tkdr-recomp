@@ -10,7 +10,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
-file(GLOB HLE_SOURCES runtime/hle/*.c runtime/hle/*.cpp runtime/gpu/*.c)
+file(GLOB HLE_SOURCES runtime/hle/*.c runtime/hle/*.cpp runtime/gpu/*.c runtime/ui/*.cpp)
+# Dear ImGui (MIT) for the settings overlay
+set(IMGUI third_party/imgui)
+add_library(imgui STATIC ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp
+            ${IMGUI}/imgui_widgets.cpp ${IMGUI}/backends/imgui_impl_sdl2.cpp
+            ${IMGUI}/backends/imgui_impl_sdlrenderer2.cpp)
+target_include_directories(imgui PUBLIC ${IMGUI})
 
 # ATRAC3/ATRAC3+ decoders from FFmpeg (LGPL-2.1+), see third_party/at3_standalone
 file(GLOB AT3_SOURCES third_party/at3_standalone/*.cpp)
@@ -19,10 +25,14 @@ target_include_directories(at3 PUBLIC third_party/at3_standalone PRIVATE third_p
 set_target_properties(at3 PROPERTIES CXX_STANDARD 17)
 if(EMSCRIPTEN)
     target_compile_options(at3 PRIVATE -pthread)
+    target_compile_options(imgui PRIVATE -pthread -sUSE_SDL=2)
+else()
+    find_package(SDL2 REQUIRED)
+    target_link_libraries(imgui PUBLIC SDL2::SDL2)
 endif()
 add_executable(tkdr runtime/main.c runtime/vfpu.c runtime/frontend.c runtime/web/web.c ${HLE_SOURCES} ${GENERATED_SOURCES})
 target_include_directories(tkdr PRIVATE runtime ${GEN_DIR})
-target_link_libraries(tkdr PRIVATE at3)
+target_link_libraries(tkdr PRIVATE at3 imgui)
 # minimal FFmpeg (H.264 only), built by tools/build_ffmpeg.sh
 if(EMSCRIPTEN)
     set(FFMPEG_DIR ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/web)

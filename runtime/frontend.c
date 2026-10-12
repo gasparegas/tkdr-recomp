@@ -1,4 +1,5 @@
-// SDL2 frontend: shows the PSP framebuffer, maps the keyboard to buttons.
+// SDL2 frontend: shows the PSP framebuffer, routes input through the
+// configurable mapping (runtime/ui), and draws the settings overlay (F1).
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,29 +12,10 @@
 
 extern uint32_t g_buttons;
 
-enum {
-    PSP_SELECT = 0x0001, PSP_START = 0x0008, PSP_UP = 0x0010, PSP_RIGHT = 0x0020,
-    PSP_DOWN = 0x0040, PSP_LEFT = 0x0080, PSP_LTRIGGER = 0x0100, PSP_RTRIGGER = 0x0200,
-    PSP_TRIANGLE = 0x1000, PSP_CIRCLE = 0x2000, PSP_CROSS = 0x4000, PSP_SQUARE = 0x8000,
-};
-
-static uint32_t key_to_button(SDL_Keycode k) {
-    switch (k) {
-    case SDLK_UP: return PSP_UP;
-    case SDLK_DOWN: return PSP_DOWN;
-    case SDLK_LEFT: return PSP_LEFT;
-    case SDLK_RIGHT: return PSP_RIGHT;
-    case SDLK_RETURN: return PSP_START;
-    case SDLK_SPACE: return PSP_SELECT;
-    case SDLK_x: return PSP_CROSS;      // Tekken: right kick
-    case SDLK_c: return PSP_CIRCLE;     // right punch
-    case SDLK_z: return PSP_SQUARE;     // left kick... see README for the real layout
-    case SDLK_s: return PSP_TRIANGLE;
-    case SDLK_q: return PSP_LTRIGGER;
-    case SDLK_w: return PSP_RTRIGGER;
-    default: return 0;
-    }
-}
+void ui_init(SDL_Window *win, SDL_Renderer *ren);
+int ui_event(SDL_Event *e);
+uint32_t ui_input_mask(void);
+void ui_draw(void);
 
 // Convert the displayed framebuffer to ABGR8888 (byte order R,G,B,A).
 void frontend_scanout(uint32_t *out) {
@@ -58,50 +40,6 @@ void frontend_scanout(uint32_t *out) {
         }
 }
 
-// Gamepad: buttons with the PSP's face-button layout; the left stick also
-// drives the d-pad (Tekken is played on the d-pad).
-static uint32_t g_pad_buttons;
-extern uint8_t g_analog_x, g_analog_y;
-
-static uint32_t pad_button(int b) {
-    switch (b) {
-    case SDL_CONTROLLER_BUTTON_A: return PSP_CROSS;
-    case SDL_CONTROLLER_BUTTON_B: return PSP_CIRCLE;
-    case SDL_CONTROLLER_BUTTON_X: return PSP_SQUARE;
-    case SDL_CONTROLLER_BUTTON_Y: return PSP_TRIANGLE;
-    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return PSP_LTRIGGER;
-    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return PSP_RTRIGGER;
-    case SDL_CONTROLLER_BUTTON_BACK: return PSP_SELECT;
-    case SDL_CONTROLLER_BUTTON_START: return PSP_START;
-    case SDL_CONTROLLER_BUTTON_DPAD_UP: return PSP_UP;
-    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return PSP_DOWN;
-    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return PSP_LEFT;
-    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return PSP_RIGHT;
-    default: return 0;
-    }
-}
-
-static uint32_t g_stick_buttons, g_key_buttons;
-
-static void stick(int axis, int value) {
-    const int dead = 12000;
-    if (axis == SDL_CONTROLLER_AXIS_LEFTX) {
-        g_analog_x = (uint8_t)((value + 32768) >> 8);
-        g_stick_buttons &= ~(uint32_t)(PSP_LEFT | PSP_RIGHT);
-        if (value < -dead) g_stick_buttons |= PSP_LEFT;
-        if (value > dead) g_stick_buttons |= PSP_RIGHT;
-    } else if (axis == SDL_CONTROLLER_AXIS_LEFTY) {
-        g_analog_y = (uint8_t)((value + 32768) >> 8);
-        g_stick_buttons &= ~(uint32_t)(PSP_UP | PSP_DOWN);
-        if (value < -dead) g_stick_buttons |= PSP_UP;
-        if (value > dead) g_stick_buttons |= PSP_DOWN;
-    } else if (axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
-        uint32_t b = axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? PSP_LTRIGGER : PSP_RTRIGGER;
-        if (value > 16000) g_stick_buttons |= b;
-        else g_stick_buttons &= ~b;
-    }
-}
-
 void audio_pull(int16_t *out, int frames);
 
 static void audio_cb(void *ud, Uint8 *stream, int len) {
@@ -119,45 +57,42 @@ void script_tick(void);
 static void frame(void) {
     static uint32_t pixels[480 * 272];
     script_tick();
-    {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) exit(0);
-            if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
-                uint32_t b = key_to_button(e.key.keysym.sym);
-                if (e.type == SDL_KEYDOWN) g_key_buttons |= b;
-                else g_key_buttons &= ~b;
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) exit(0);
+        if (ui_event(&e)) continue;
 #ifndef __EMSCRIPTEN__
-                if (e.key.keysym.sym == SDLK_ESCAPE) exit(0);
+        if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) exit(0);
 #endif
-            } else if (e.type == SDL_CONTROLLERDEVICEADDED) {
-                SDL_GameControllerOpen(e.cdevice.which);
-            } else if (e.type == SDL_CONTROLLERBUTTONDOWN) {
-                g_pad_buttons |= pad_button(e.cbutton.button);
-            } else if (e.type == SDL_CONTROLLERBUTTONUP) {
-                g_pad_buttons &= ~pad_button(e.cbutton.button);
-            } else if (e.type == SDL_CONTROLLERAXISMOTION) {
-                stick(e.caxis.axis, e.caxis.value);
-            }
-        }
-        if (!getenv("INPUT")) g_buttons = g_key_buttons | g_pad_buttons | g_stick_buttons;
-        frontend_scanout(pixels);
-        SDL_UpdateTexture(tex, NULL, pixels, 480 * 4);
-        SDL_RenderClear(ren);
-        SDL_RenderCopy(ren, tex, NULL, NULL);
-        SDL_RenderPresent(ren);
-        frames++;
-        if (SDL_GetTicks() - last >= 1000) {
-            extern uint32_t g_frames_presented;
-            static uint32_t last_presented;
-            char title[96];
-            snprintf(title, sizeof title, "tkdr - game %u fps (display %u) - %u prims/s",
-                     g_frames_presented - last_presented, frames, gpu_stat_prims());
-            last_presented = g_frames_presented;
-            SDL_SetWindowTitle(win, title);
-            frames = 0;
-            last = SDL_GetTicks();
-        }
+    }
+    if (!getenv("INPUT")) g_buttons = ui_input_mask();
+
+    frontend_scanout(pixels);
+    SDL_UpdateTexture(tex, NULL, pixels, 480 * 4);
+    // letterbox the 480x272 picture into the window
+    int ww, wh;
+    SDL_GetRendererOutputSize(ren, &ww, &wh);
+    SDL_Rect dst = {0, 0, ww, ww * 272 / 480};
+    if (dst.h > wh) dst = (SDL_Rect){0, 0, wh * 480 / 272, wh};
+    dst.x = (ww - dst.w) / 2;
+    dst.y = (wh - dst.h) / 2;
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+    SDL_RenderClear(ren);
+    SDL_RenderCopy(ren, tex, NULL, &dst);
+    ui_draw();
+    SDL_RenderPresent(ren);
+
+    frames++;
+    if (SDL_GetTicks() - last >= 1000) {
+        extern uint32_t g_frames_presented;
+        static uint32_t last_presented;
+        char title[96];
+        snprintf(title, sizeof title, "tkdr - game %u fps (display %u) - F1 settings", g_frames_presented - last_presented,
+                 frames);
+        last_presented = g_frames_presented;
+        SDL_SetWindowTitle(win, title);
+        frames = 0;
+        last = SDL_GetTicks();
     }
 }
 
@@ -177,14 +112,33 @@ void frontend_run(void) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return;
     }
-    win = SDL_CreateWindow("tkdr", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 544, SDL_WINDOW_RESIZABLE);
-    ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (getenv("UI_PREVIEW")) SDL_SetHint(SDL_HINT_VIDEODRIVER, "offscreen");
+    win = SDL_CreateWindow("tkdr", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 544,
+                           SDL_WINDOW_RESIZABLE | (getenv("UI_PREVIEW") ? 0 : SDL_WINDOW_ALLOW_HIGHDPI));
+    ren = SDL_CreateRenderer(win, -1, getenv("UI_PREVIEW") ? SDL_RENDERER_SOFTWARE : SDL_RENDERER_PRESENTVSYNC);
     tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 480, 272);
-    SDL_RenderSetLogicalSize(ren, 480, 272);
+    ui_init(win, ren);
     SDL_AudioSpec want = {.freq = 44100, .format = AUDIO_S16SYS, .channels = 2, .samples = 1024, .callback = audio_cb};
     SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
     if (dev) SDL_PauseAudioDevice(dev, 0);
     last = SDL_GetTicks();
+#ifndef __EMSCRIPTEN__
+    // UI_PREVIEW=file.bmp: render game + settings overlay offscreen after a few seconds
+    const char *preview = getenv("UI_PREVIEW");
+    if (preview) {
+        void ui_set_open(int open);
+        SDL_Delay(1000 * (getenv("UI_PREVIEW_DELAY") ? (Uint32)atoi(getenv("UI_PREVIEW_DELAY")) : 5));
+        ui_set_open(1);
+        for (int i = 0; i < 4; i++) frame();
+        int w, h;
+        SDL_GetRendererOutputSize(ren, &w, &h);
+        SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
+        SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, s->pixels, s->pitch);
+        SDL_SaveBMP(s, preview);
+        exit(0);
+    }
+#endif
 #ifdef __EMSCRIPTEN__
     emscripten_set_main_loop(frame, 0, 1);
 #else
