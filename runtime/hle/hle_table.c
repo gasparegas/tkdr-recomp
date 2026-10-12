@@ -22,6 +22,15 @@ void __sceSasSetSL(Ctx *c);
 void __sceSasSetSimpleADSR(Ctx *c);
 void __sceSasSetVoice(Ctx *c);
 void __sceSasSetVolume(Ctx *c);
+void sceAtracAddStreamData(Ctx *c);
+void sceAtracDecodeData(Ctx *c);
+void sceAtracGetNextDecodePosition(Ctx *c);
+void sceAtracGetRemainFrame(Ctx *c);
+void sceAtracGetStreamDataInfo(Ctx *c);
+void sceAtracReleaseAtracID(Ctx *c);
+void sceAtracResetPlayPosition(Ctx *c);
+void sceAtracSetDataAndGetID(Ctx *c);
+void sceAtracSetLoopNum(Ctx *c);
 void sceAudioChRelease(Ctx *c);
 void sceAudioChReserve(Ctx *c);
 void sceAudioChangeChannelConfig(Ctx *c);
@@ -233,6 +242,15 @@ const HleEntry g_hle_table[] = {
     {"__sceSasSetSimpleADSR", __sceSasSetSimpleADSR},
     {"__sceSasSetVoice", __sceSasSetVoice},
     {"__sceSasSetVolume", __sceSasSetVolume},
+    {"sceAtracAddStreamData", sceAtracAddStreamData},
+    {"sceAtracDecodeData", sceAtracDecodeData},
+    {"sceAtracGetNextDecodePosition", sceAtracGetNextDecodePosition},
+    {"sceAtracGetRemainFrame", sceAtracGetRemainFrame},
+    {"sceAtracGetStreamDataInfo", sceAtracGetStreamDataInfo},
+    {"sceAtracReleaseAtracID", sceAtracReleaseAtracID},
+    {"sceAtracResetPlayPosition", sceAtracResetPlayPosition},
+    {"sceAtracSetDataAndGetID", sceAtracSetDataAndGetID},
+    {"sceAtracSetLoopNum", sceAtracSetLoopNum},
     {"sceAudioChRelease", sceAudioChRelease},
     {"sceAudioChReserve", sceAudioChReserve},
     {"sceAudioChangeChannelConfig", sceAudioChangeChannelConfig},
@@ -422,4 +440,4 @@ const HleEntry g_hle_table[] = {
     {"sceUtilityUnloadNetModule", sceUtilityUnloadNetModule},
     {"sceWlanGetSwitchState", sceWlanGetSwitchState},
 };
-const unsigned g_hle_table_count = 209;
+const unsigned g_hle_table_count = 218;
