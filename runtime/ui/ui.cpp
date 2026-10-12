@@ -49,6 +49,26 @@ uint32_t ui_input_mask(void) { return g_open ? 0 : input_poll(); }
 
 static const char *k_socd_names[] = {"Last input wins", "Neutral", "First input wins", "Up wins (hitbox)", "Off"};
 
+extern "C" {
+void texrep_request_reload(void);
+void texrep_request_dump(int on);
+void texrep_status(int *replacements, int *dumping, const char **dir);
+}
+
+static void textures_tab() {
+    int n, dumping;
+    const char *dir;
+    texrep_status(&n, &dumping, &dir);
+    ImGui::TextWrapped("Texture packs use the PPSSPP format: put textures.ini and the PNGs in");
+    ImGui::TextColored(ImVec4(1.f, 0.85f, 0.2f, 1.f), "%s/", dir);
+    ImGui::Text("%d replacement(s) loaded", n);
+    if (ImGui::Button("Reload pack")) texrep_request_reload();
+    bool d = dumping != 0;
+    if (ImGui::Checkbox("Dump new textures", &d)) texrep_request_dump(d);
+    ImGui::TextDisabled("Dumped textures go to %s/new/ named by hash.", dir);
+    ImGui::TextDisabled("Move edited ones (any size) up one folder to use them.");
+}
+
 static void input_tab() {
     // device selection
     std::string label = "Any device";
@@ -158,6 +178,10 @@ extern "C" void ui_draw(void) {
         if (ImGui::BeginTabBar("tabs")) {
             if (ImGui::BeginTabItem("Input")) {
                 input_tab();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Textures")) {
+                textures_tab();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("About")) {

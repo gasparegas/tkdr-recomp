@@ -73,6 +73,20 @@ never uploaded. Save data stays in the browser (IndexedDB).
 
 Gamepads work too (face buttons in the PSP layout; the left stick also drives the d-pad).
 
+Press **F1** for the settings overlay: input devices and bindings (keyboard,
+gamepads, arcade sticks, hitboxes, with SOCD options) and texture packs.
+
+## Texture packs
+
+Packs made for PPSSPP work as they are: put `textures.ini` and the PNGs in
+`textures/ULUS10139/` next to where you run the game (or point `TEX_DIR` at the
+folder). Replacements may be any size, e.g. 4× the original for HD packs.
+
+To make your own, enable *Dump new textures* in the F1 overlay (or run with
+`TEX_DUMP=1`): every texture the game uses is saved to `textures/ULUS10139/new/`
+under the same name PPSSPP would give it. Edit a PNG, move it up into
+`textures/ULUS10139/` and press *Reload pack*. Movie frames are never dumped.
+
 ## Status
 
 Boots, plays movies with sound, menus, save/load, and full matches against the CPU
@@ -98,6 +112,8 @@ Third-party code keeps its own license:
 
 - `third_party/at3_standalone/`: ATRAC3/ATRAC3+ decoders from FFmpeg, in the
   standalone form extracted by the PPSSPP project, LGPL-2.1-or-later.
+- `third_party/imgui/`: Dear ImGui, MIT.
+- `third_party/stb/`: stb_image and stb_image_write, public domain.
 - FFmpeg (H.264 decoder), downloaded and built by `tools/build_ffmpeg.sh`,
   LGPL-2.1-or-later.
 

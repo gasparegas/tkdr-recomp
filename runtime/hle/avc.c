@@ -60,6 +60,8 @@ static uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); 
 
 // Decode the pending AU and write the picture (if one comes out) to guest
 // memory: `stride` in pixels, `mode` 0 565, 1 5551, 2 4444, 3 8888.
+void texrep_note_video(uint32_t addr, uint32_t bytes);
+
 int avc_decode(uint32_t dst, int stride, int mode) {
     if (!g_avc.au_size) return 0;
     g_avc.pkt->data = g_avc.au;
@@ -87,6 +89,7 @@ int avc_decode(uint32_t dst, int stride, int mode) {
             }
         }
     }
+    texrep_note_video(dst, (uint32_t)(h * stride) * (mode == 3 ? 4u : 2u));
     return 1;
 }
 

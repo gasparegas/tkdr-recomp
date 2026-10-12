@@ -72,7 +72,13 @@ void gpu_block_transfer(void);
 void gpu_load_clut(void);
 void gpu_tex_invalidate(void);
 void raster_flush(void);  // wait for queued primitives  // texture memory may have changed
-uint32_t gpu_stat_prims(void);  // primitives drawn since the last call
+uint32_t gpu_stat_prims(void);
+
+// texreplace.c: PPSSPP-compatible texture packs (TEX_DIR) and dumping (TEX_DUMP)
+uint32_t *texrep_lookup(uint32_t addr, int fmt, int w, int h, uint32_t texbufwidth, uint32_t texsize,
+                        uint32_t clutfmt, const uint32_t *decoded, int *rw, int *rh);
+void texrep_clut_loaded(uint32_t bytes);
+int texrep_epoch(void);  // changes when the pack is reloaded or dumping toggled  // primitives drawn since the last call
 
 // Address of a register-relative pointer: (BASE high byte << 24) | value
 static inline uint32_t ge_addr(uint32_t hi_cmd_val, uint32_t lo24) {

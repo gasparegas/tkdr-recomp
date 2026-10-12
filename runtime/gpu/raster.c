@@ -367,6 +367,8 @@ static void fb_write(const Target *t, int x, int y, uint32_t c, uint32_t mask) {
 
 typedef struct {
     const uint32_t *pix;  // decoded RGBA8888 texels (texture cache)
+    int pw, ph;           // size of pix: w x h, or larger for a replacement
+    float psx, psy;       // pw / w, ph / h
     int enabled, fmt, swizzle, w, h, stride, clamp_u, clamp_v, linear, func, rgba, dbl;
     uint32_t addr;
     float env[3];
@@ -480,7 +482,9 @@ static uint32_t dxt_color(uint32_t a, int x, int y, int fmt) {
 
 static int wrap(int c, int size, int clamp) {
     if (clamp) return c < 0 ? 0 : c >= size ? size - 1 : c;
-    return c & (size - 1);
+    if (!(size & (size - 1))) return c & (size - 1);
+    c %= size;  // replacement textures need not be powers of two
+    return c < 0 ? c + size : c;
 }
 
 // ---------------------------------------------------------------- texture cache
@@ -491,9 +495,10 @@ static int wrap(int c, int size, int clamp) {
 #define TEX_CACHE 512
 typedef struct {
     uint32_t addr, key_fmt, key_size, key_clut, clut_hash, gen;
+    int epoch;  // texture pack generation (texrep_epoch)
     uint64_t data_hash;
     uint32_t *pix;
-    int w, h;
+    int pw, ph, cap;  // pixel size (a replacement may be larger), allocated texels
 } TexEntry;
 static TexEntry g_tex_cache[TEX_CACHE];
 static uint32_t g_tex_gen = 1;
@@ -553,6 +558,14 @@ static void flush_if_rendering_to(uint32_t lo, uint32_t hi) {
         }
 }
 
+static void tex_use(TexState *t, const TexEntry *e) {
+    t->pix = e->pix;
+    t->pw = e->pw;
+    t->ph = e->ph;
+    t->psx = (float)e->pw / (float)t->w;
+    t->psy = (float)e->ph / (float)t->h;
+}
+
 static void tex_cache_lookup(TexState *t) {
     uint32_t key_fmt = (uint32_t)t->fmt | (uint32_t)t->swizzle << 8 | (uint32_t)t->stride << 16;
     uint32_t key_size = (uint32_t)t->w | (uint32_t)t->h << 16;
@@ -563,9 +576,9 @@ static void tex_cache_lookup(TexState *t) {
     uint32_t slot = (t->addr * 2654435761u ^ key_fmt ^ key_size * 31u) % TEX_CACHE;
     TexEntry *e = &g_tex_cache[slot];
     int same_key = e->pix && e->addr == t->addr && e->key_fmt == key_fmt && e->key_size == key_size &&
-                   e->key_clut == key_clut && e->clut_hash == clut_hash;
+                   e->key_clut == key_clut && e->clut_hash == clut_hash && e->epoch == texrep_epoch();
     if (same_key && e->gen == g_tex_gen) {
-        t->pix = e->pix;
+        tex_use(t, e);
         return;
     }
     uint32_t n = tex_bytes(t);
@@ -573,27 +586,43 @@ static void tex_cache_lookup(TexState *t) {
     uint64_t h = (t->addr & 0x1FFFFFFF) + n <= GUEST_MEM_SIZE ? hash_bytes(host(t->addr), n) : 0;
     if (same_key && e->data_hash == h) {
         e->gen = g_tex_gen;
-        t->pix = e->pix;
+        tex_use(t, e);
         return;
     }
-    if (!e->pix || e->w * e->h < t->w * t->h) {
+    if (!e->pix || e->cap < t->w * t->h) {
         free(e->pix);
         e->pix = malloc((size_t)t->w * (size_t)t->h * 4);
+        e->cap = t->w * t->h;
     }
     t->pix = NULL;  // fetch() decodes from guest memory
     for (int y = 0; y < t->h; y++)
         for (int x = 0; x < t->w; x++) e->pix[y * t->w + x] = fetch(t, x, y);
+    e->pw = t->w;
+    e->ph = t->h;
+    int rw, rh;
+    uint32_t *rep = texrep_lookup(t->addr, t->fmt, t->w, t->h, R(GE_TEXBUFWIDTH0), R(GE_TEXSIZE0),
+                                  R(GE_CLUTFORMAT), e->pix, &rw, &rh);
+    if (rep) {
+        free(e->pix);
+        e->pix = rep;
+        e->pw = rw;
+        e->ph = rh;
+        e->cap = rw * rh;
+    }
     e->addr = t->addr; e->key_fmt = key_fmt; e->key_size = key_size; e->key_clut = key_clut;
-    e->clut_hash = clut_hash; e->gen = g_tex_gen; e->data_hash = h; e->w = t->w; e->h = t->h;
-    t->pix = e->pix;
+    e->clut_hash = clut_hash; e->gen = g_tex_gen; e->data_hash = h; e->epoch = texrep_epoch();
+    tex_use(t, e);
 }
 
 // u, v in texels
 static void sample(const TexState *t, float u, float v, float *out) {
     const uint32_t *p = t->pix;
+    int w = t->pw, h = t->ph;
+    if (w != t->w) u *= t->psx;
+    if (h != t->h) v *= t->psy;
     if (!t->linear) {
-        int x = wrap((int)floorf(u), t->w, t->clamp_u), y = wrap((int)floorf(v), t->h, t->clamp_v);
-        uint32_t c = p[y * t->w + x];
+        int x = wrap((int)floorf(u), w, t->clamp_u), y = wrap((int)floorf(v), h, t->clamp_v);
+        uint32_t c = p[y * w + x];
         out[0] = (float)(c & 0xFF); out[1] = (float)(c >> 8 & 0xFF);
         out[2] = (float)(c >> 16 & 0xFF); out[3] = (float)(c >> 24);
         return;
@@ -602,8 +631,8 @@ static void sample(const TexState *t, float u, float v, float *out) {
     v -= 0.5f;
     int x0 = (int)floorf(u), y0 = (int)floorf(v);
     float fx = u - (float)x0, fy = v - (float)y0;
-    int xa = wrap(x0, t->w, t->clamp_u), xb = wrap(x0 + 1, t->w, t->clamp_u);
-    int ya = wrap(y0, t->h, t->clamp_v) * t->w, yb = wrap(y0 + 1, t->h, t->clamp_v) * t->w;
+    int xa = wrap(x0, w, t->clamp_u), xb = wrap(x0 + 1, w, t->clamp_u);
+    int ya = wrap(y0, h, t->clamp_v) * w, yb = wrap(y0 + 1, h, t->clamp_v) * w;
     uint32_t c[4] = {p[ya + xa], p[ya + xb], p[yb + xa], p[yb + xb]};
     for (int i = 0; i < 4; i++) {
         float a = (float)(c[0] >> (8 * i) & 0xFF), b = (float)(c[1] >> (8 * i) & 0xFF);
@@ -1179,4 +1208,5 @@ void gpu_load_clut(void) {
     uint32_t bytes = (R(GE_LOADCLUT) & 0x3F) * 32;
     if (bytes > sizeof g_ge.clut) bytes = sizeof g_ge.clut;
     memcpy(g_ge.clut, host(addr), bytes);
+    texrep_clut_loaded(bytes);
 }
