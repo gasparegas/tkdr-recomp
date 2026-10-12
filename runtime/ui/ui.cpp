@@ -14,6 +14,8 @@ static SDL_Window *g_win;
 static bool g_open;
 static int g_capture_action = -1;  // action waiting for an input to bind
 static bool g_capture_armed;  // wait until everything is released first
+static bool g_show_fps;  // F2
+extern "C" int g_fps_game, g_fps_display;
 static void video_load();
 
 extern "C" {
@@ -42,6 +44,10 @@ void ui_set_open(int open) {
 
 // Returns 1 when the event belongs to the overlay.
 int ui_event(SDL_Event *e) {
+    if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_F2 && !e->key.repeat) {
+        g_show_fps = !g_show_fps;
+        return 1;
+    }
     if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_F1 && !e->key.repeat) {
         g_open = !g_open;
         g_capture_action = -1;
@@ -222,13 +228,21 @@ static void input_tab() {
 
 extern "C" void ui_draw(void) {
     bool touch = !g_open && touch_visible();
-    if (!g_open && !touch) return;
+    if (!g_open && !touch && !g_show_fps) return;
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     if (touch) {
         ImVec2 ds = ImGui::GetIO().DisplaySize;
         touch_draw(ImGui::GetBackgroundDrawList(), ds.x, ds.y);
+    }
+    if (g_show_fps) {  // game frames / display frames in the last second
+        char t[48];
+        snprintf(t, sizeof t, "%d fps  (display %d)", g_fps_game, g_fps_display);
+        ImDrawList *dl = ImGui::GetForegroundDrawList();
+        ImVec2 sz = ImGui::CalcTextSize(t);
+        dl->AddRectFilled(ImVec2(6, 6), ImVec2(14 + sz.x, 12 + sz.y), IM_COL32(0, 0, 0, 160), 4.f);
+        dl->AddText(ImVec2(10, 9), g_fps_game >= 55 ? IM_COL32(120, 255, 120, 255) : IM_COL32(255, 200, 80, 255), t);
     }
     // fits small screens (phones) too
     ImVec2 ds = ImGui::GetIO().DisplaySize;

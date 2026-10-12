@@ -55,6 +55,8 @@ static uint32_t frames, last;
 
 void script_tick(void);
 
+int g_fps_game, g_fps_display;  // last second, for the F2 overlay
+
 static void frame(void) {
     static uint32_t pixels[480 * 4 * 272 * 4];
     script_tick();
@@ -102,6 +104,8 @@ static void frame(void) {
         char title[96];
         snprintf(title, sizeof title, "tkdr - game %u fps (display %u) - F1 settings", g_frames_presented - last_presented,
                  frames);
+        g_fps_game = (int)(g_frames_presented - last_presented);
+        g_fps_display = (int)frames;
         last_presented = g_frames_presented;
         SDL_SetWindowTitle(win, title);
         frames = 0;
