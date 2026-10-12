@@ -77,6 +77,10 @@ uint32_t gpu_stat_prims(void);
 void gpu_set_render_scale(int n);
 int gpu_render_scale(void);
 void gpu_resolve_all(void);
+// GPU renderer (glr.c): preference, and whether a GL context is running it
+void gpu_set_gpu_renderer(int on);
+int gpu_renderer_wanted(void);
+void gpu_glr_available(int on);
 int gpu_replay(const char *path, int iters, const char *out_ppm);  // see GE_CAPTURE
 int gpu_scanout_scaled(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t *out, int max_scale);
 

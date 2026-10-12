@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include "../../third_party/imgui/backends/imgui_impl_sdl2.h"
+#include "../../third_party/imgui/backends/imgui_impl_opengl3.h"
 #include "../../third_party/imgui/backends/imgui_impl_sdlrenderer2.h"
 #include "../../third_party/imgui/imgui.h"
 #include "input.h"
@@ -20,7 +21,8 @@ static void video_load();
 
 extern "C" {
 
-void ui_init(SDL_Window *win, SDL_Renderer *ren) {
+// ren: SDL_Renderer fallback; NULL means an OpenGL context is current (gles: ES 3 / WebGL 2)
+void ui_init(SDL_Window *win, SDL_Renderer *ren, int gles) {
     g_ren = ren;
     g_win = win;
     IMGUI_CHECKVERSION();
@@ -29,8 +31,13 @@ void ui_init(SDL_Window *win, SDL_Renderer *ren) {
     io.IniFilename = nullptr;
     ImGui::StyleColorsDark();
     ImGui::GetStyle().WindowRounding = 6.f;
-    ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
-    ImGui_ImplSDLRenderer2_Init(ren);
+    if (ren) {
+        ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
+        ImGui_ImplSDLRenderer2_Init(ren);
+    } else {
+        ImGui_ImplSDL2_InitForOpenGL(win, SDL_GL_GetCurrentContext());
+        ImGui_ImplOpenGL3_Init(gles ? "#version 300 es" : "#version 330 core");
+    }
     input_load();
     video_load();
     touch_load();
@@ -71,6 +78,8 @@ uint32_t ui_input_mask(void) { return g_open ? 0 : input_poll() | touch_mask(); 
 static const char *k_socd_names[] = {"Last input wins", "Neutral", "First input wins", "Up wins (hitbox)", "Off"};
 
 extern "C" {
+void gpu_set_gpu_renderer(int on);
+int gpu_renderer_wanted(void);
 void gpu_set_render_scale(int n);
 int gpu_render_scale(void);
 void web_persist(void);
@@ -84,21 +93,34 @@ static void video_load() {
     if (getenv("RENDER_SCALE")) return;  // the command line wins
     FILE *f = fopen("ms0/tkdr-video.cfg", "r");
     if (!f) return;
-    int n;
-    if (fscanf(f, "scale=%d", &n) == 1) gpu_set_render_scale(n);
+    int n, gpu = 1;
+    if (fscanf(f, "scale=%d gpu=%d", &n, &gpu) >= 1) gpu_set_render_scale(n);
+    gpu_set_gpu_renderer(gpu);
     fclose(f);
 }
 
 static void video_save(int scale) {
     FILE *f = fopen("ms0/tkdr-video.cfg", "w");
     if (!f) return;
-    fprintf(f, "scale=%d\n", scale);
+    fprintf(f, "scale=%d gpu=%d\n", scale, gpu_renderer_wanted());
     fclose(f);
     web_persist();
 }
 
 static void video_tab() {
     int cur = gpu_render_scale();
+    int gpu = gpu_renderer_wanted();
+    ImGui::Text("Renderer");
+    if (ImGui::RadioButton("GPU (OpenGL / WebGL)", gpu)) {
+        gpu_set_gpu_renderer(1);
+        video_save(cur);
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Software", !gpu)) {
+        gpu_set_gpu_renderer(0);
+        video_save(cur);
+    }
+    ImGui::Separator();
     ImGui::Text("Internal resolution");
     for (int n = 1; n <= 4; n++) {
         char label[48];
@@ -108,7 +130,8 @@ static void video_tab() {
             video_save(n);
         }
     }
-    ImGui::TextDisabled("Higher scales need a faster CPU (software renderer).");
+    ImGui::TextDisabled(gpu ? "Rendered by the graphics card: high scales are cheap."
+                            : "Software renderer: higher scales need a fast CPU.");
 }
 
 static void textures_tab() {
@@ -229,7 +252,8 @@ static void input_tab() {
 extern "C" void ui_draw(void) {
     bool touch = !g_open && touch_visible();
     if (!g_open && !touch && !g_show_fps) return;
-    ImGui_ImplSDLRenderer2_NewFrame();
+    if (g_ren) ImGui_ImplSDLRenderer2_NewFrame();
+    else ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     if (touch) {
@@ -276,6 +300,10 @@ extern "C" void ui_draw(void) {
     ImGui::End();
     }
     ImGui::Render();
+    if (!g_ren) {
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        return;
+    }
     // HiDPI: ImGui works in window points, the renderer in pixels
     ImVec2 scale = ImGui::GetIO().DisplayFramebufferScale;
     SDL_RenderSetScale(g_ren, scale.x, scale.y);

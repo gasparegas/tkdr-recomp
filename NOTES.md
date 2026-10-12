@@ -57,6 +57,10 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
 | `INPUT="118:START,118.3:"` | scripted buttons at guest times (also as URL params on the web) |
 | `GE_CAPTURE=secs` | save the first display list started after that guest time (GE state, VRAM, RAM) to `GE_CAPTURE_FILE` (default `ge_capture.bin`) |
 | `GE_REPLAY=file` | no game: draw a capture `GE_REPLAY_ITERS` times (default 20), print ms/frame, save `GE_REPLAY_OUT=out.ppm`; with `RENDER_SCALE`, `RASTER_THREADS` |
+| `HIDDEN_WINDOW=1` | GPU renderer without showing the window (tests) |
+| `GL_SHOTS=dir` | save what the GPU renderer drew for the displayed framebuffer every guest second (PPM) |
+| `NO_GL=1` | no OpenGL: software renderer, presented with SDL_Renderer |
+| `FPS=1` | (windowed) print the fps line every second |
 | `TOUCH=1` | show the on-screen controls from the start (web: `?touch`) |
 | `UI_PREVIEW_NOMENU=1`, `UI_PREVIEW_SIZE=WxH` | with `UI_PREVIEW`: overlay without the menu, at a window size (e.g. a phone) |
 | `RENDER_SCALE=n` | internal resolution 1..4 (overrides the F1 > Video setting) |
@@ -93,3 +97,18 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
   recompiler sources.
 - Local test: `python3 tools/serve.py build/web-host 8082 --iso game/tekken_dr.iso
   --eboot game/tkpsp.elf`, open `/tkdr.html?iso=/game.iso&eboot=/eboot.bin`.
+
+## GPU renderer (runtime/gpu/glr.c)
+
+- raster.c keeps vertex decode, transform, lighting, near clipping and culling;
+  with `g_glr_active` it records a `GlrState` per state change and clip-space
+  vertices (perspective restored from 1/w) instead of rasterizing. Textures go
+  once per version (`serial`, bumped on every redecode) and are evicted LRU.
+- The GE thread hands the recorded buffer over at each display list end and may
+  wait if more than 3 lists are not yet taken; the GL thread (frontend frame)
+  uploads all vertices at once and replays states/draws, skipping redundant GL
+  calls (they are slow in WebGL).
+- Each PSP framebuffer is an FBO covering 512x512 PSP pixels at the render
+  scale; PSP row 0 is GL row 0 (flipped only when presenting). An FBO starts
+  from what VRAM holds. Not done yet: framebuffers read back by the CPU or used
+  as textures, colour test, fog, doubled-alpha and absolute-difference blending.

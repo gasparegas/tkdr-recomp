@@ -21,7 +21,7 @@ file(GLOB HLE_SOURCES runtime/hle/*.c runtime/hle/*.cpp runtime/gpu/*.c runtime/
 set(IMGUI third_party/imgui)
 add_library(imgui STATIC ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp
             ${IMGUI}/imgui_widgets.cpp ${IMGUI}/backends/imgui_impl_sdl2.cpp
-            ${IMGUI}/backends/imgui_impl_sdlrenderer2.cpp)
+            ${IMGUI}/backends/imgui_impl_sdlrenderer2.cpp ${IMGUI}/backends/imgui_impl_opengl3.cpp)
 target_include_directories(imgui PUBLIC ${IMGUI})
 
 # ATRAC3/ATRAC3+ decoders from FFmpeg (LGPL-2.1+), see third_party/at3_standalone
@@ -32,9 +32,11 @@ set_target_properties(at3 PROPERTIES CXX_STANDARD 17)
 if(EMSCRIPTEN)
     target_compile_options(at3 PRIVATE -pthread)
     target_compile_options(imgui PRIVATE -pthread -sUSE_SDL=2)
+    target_compile_definitions(imgui PRIVATE IMGUI_IMPL_OPENGL_ES3)
 else()
     find_package(SDL2 REQUIRED)
-    target_link_libraries(imgui PUBLIC SDL2::SDL2)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(imgui PUBLIC SDL2::SDL2 OpenGL::GL)
 endif()
 add_executable(tkdr runtime/main.c runtime/vfpu.c runtime/frontend.c runtime/web/web.c ${HLE_SOURCES} ${GENERATED_SOURCES})
 if(RECOMP_DYNAMIC)
@@ -66,7 +68,7 @@ if(EMSCRIPTEN)
     # Browser build: pthreads = Web Workers on a shared heap (needs COOP/COEP headers)
     target_compile_options(tkdr PRIVATE -pthread -sUSE_SDL=2)
     target_link_options(tkdr PRIVATE
-        -pthread -sUSE_SDL=2
+        -pthread -sUSE_SDL=2 -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2
         -sPTHREAD_POOL_SIZE=48 -sINITIAL_MEMORY=768MB
         -sSTACK_SIZE=1MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB
         -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV,FS,IDBFS,addRunDependency,removeRunDependency -sEXPORTED_FUNCTIONS=_main,_web_present,_web_frames,_web_time,_web_resize

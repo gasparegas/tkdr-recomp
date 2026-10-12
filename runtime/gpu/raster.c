@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include "glr.h"
 #include "gpu.h"
 
 #define R(reg_) (g_ge.cmd[reg_])
@@ -432,6 +433,14 @@ static pthread_mutex_t g_surf_lock = PTHREAD_MUTEX_INITIALIZER;  // vs. the fron
 static uint64_t hash_bytes(const uint8_t *p, size_t n);
 static int g_band_shift = 3;  // raster band strip height: 8 rows at 1x, 16 at 2-3x, 32 at 4x
 
+// GPU renderer: wanted (setting), available (a GL context runs glr_execute).
+// Switched at the end of a display list (gpu_resolve_all), a safe point.
+static volatile int g_gpu_pref = 1, g_gpu_avail;
+static void glr_switched(void);
+void gpu_set_gpu_renderer(int on) { g_gpu_pref = on != 0; }
+int gpu_renderer_wanted(void) { return g_gpu_pref; }
+void gpu_glr_available(int on) { g_gpu_avail = on != 0; }
+
 void gpu_set_render_scale(int n) { g_scale_req = n < 1 ? 1 : n > 4 ? 4 : n; }
 int gpu_render_scale(void) { return g_scale_req ? g_scale_req : g_scale; }
 
@@ -590,6 +599,12 @@ static int surf_transfer(uint32_t src, uint32_t sstride, uint32_t sx, uint32_t s
 // End of a display list: make VRAM match what was drawn. Also applies a
 // pending scale change. Called on the GPU thread with the queue drained.
 void gpu_resolve_all(void) {
+    int want = g_gpu_pref && g_gpu_avail && !getenv("HEADLESS");
+    if (want != g_glr_active) {
+        g_glr_active = want;
+        glr_switched();
+        fprintf(stderr, "renderer: %s\n", want ? "GPU" : "software");
+    }
     pthread_mutex_lock(&g_surf_lock);
     if (g_scale_req && g_scale_req != g_scale) {
         for (int k = 0; k < MAX_SURFS; k++)
@@ -673,7 +688,7 @@ static Surf *surf_get(uint32_t addr, uint32_t stride, uint32_t fmt, int rows) {
 
 // Attach scaled surfaces to a target about to be drawn (GPU thread).
 static void target_scale(Target *t, int uses_depth) {
-    if (g_scale <= 1 || t->fb_stride == 0 || t->sy2 >= SURF_MAX_ROWS) return;
+    if (g_scale <= 1 || g_glr_active || t->fb_stride == 0 || t->sy2 >= SURF_MAX_ROWS) return;
     int rows = t->sy2 + 1;
     Surf *c = surf_get(t->fb, t->fb_stride, t->fb_fmt, rows);
     if (!c) return;
@@ -735,6 +750,7 @@ int gpu_scanout_scaled(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t *o
 typedef struct {
     const uint32_t *pix;  // decoded RGBA8888 texels (texture cache)
     int pw, ph;           // size of pix: w x h, or larger for a replacement
+    uint32_t serial;      // identifies these texels (GPU renderer cache)
     float psx, psy;       // pw / w, ph / h
     int enabled, fmt, swizzle, w, h, stride, clamp_u, clamp_v, linear, func, rgba, dbl;
     uint32_t addr;
@@ -866,6 +882,7 @@ typedef struct {
     uint64_t data_hash;
     uint32_t *pix;
     int pw, ph, cap;  // pixel size (a replacement may be larger), allocated texels
+    uint32_t serial;  // changes whenever pix is redecoded
 } TexEntry;
 static TexEntry g_tex_cache[TEX_CACHE];
 static uint32_t g_tex_gen = 1;
@@ -945,8 +962,11 @@ static void tex_retire(void *pix, int texels) {
     g_retired_bytes += (size_t)texels * 4;
 }
 
+static uint32_t g_tex_serial;
+
 static void tex_use(TexState *t, const TexEntry *e) {
     t->pix = e->pix;
+    t->serial = e->serial;
     t->pw = e->pw;
     t->ph = e->ph;
     t->psx = (float)e->pw / (float)t->w;
@@ -998,6 +1018,7 @@ static void tex_cache_lookup(TexState *t) {
     }
     e->addr = t->addr; e->key_fmt = key_fmt; e->key_size = key_size; e->key_clut = key_clut;
     e->clut_hash = clut_hash; e->gen = g_tex_gen; e->data_hash = h; e->epoch = texrep_epoch();
+    e->serial = ++g_tex_serial;
     tex_use(t, e);
 }
 
@@ -1490,9 +1511,142 @@ static void raster_init(void) {
     fprintf(stderr, "raster: %d worker threads\n", g_nworkers);
 }
 
+// ---------------------------------------------------------------- GPU renderer (glr.h)
+
+static GlrState g_glr_last;
+static int g_glr_have_last;
+static uint32_t g_glr_fbs[16];  // framebuffers whose FBO was started from VRAM
+static int g_glr_nfbs;
+
+static void glr_switched(void) {
+    g_glr_have_last = 0;
+    g_glr_nfbs = 0;  // FBOs restart from VRAM
+}
+
+// The FBO of a framebuffer drawn for the first time starts with what VRAM holds.
+static void glr_fb_first_use(const Target *t) {
+    uint32_t fb = t->fb & 0x0FFFFFF0u;
+    for (int k = 0; k < g_glr_nfbs; k++)
+        if (g_glr_fbs[k] == fb) return;
+    if (g_glr_nfbs < 16) g_glr_fbs[g_glr_nfbs++] = fb;
+    static uint32_t px[480 * 272];
+    for (int y = 0; y < 272; y++)
+        for (int x = 0; x < 480; x++) px[y * 480 + x] = fb_read(t, x, y);
+    glr_fb_init(fb, 480, 272, px);
+}
+
+static void glr_begin(const PixState *ps) {
+    const Target *t = &ps->tg;
+    const TexState *x = &ps->tex;
+    glr_fb_first_use(t);
+    GlrState g;
+    memset(&g, 0, sizeof g);
+    g.fb = t->fb;
+    g.fb_stride = t->fb_stride;
+    g.fb_fmt = t->fb_fmt;
+    g.sx1 = (int16_t)t->sx1; g.sy1 = (int16_t)t->sy1; g.sx2 = (int16_t)t->sx2; g.sy2 = (int16_t)t->sy2;
+    if (x->enabled && x->pix && !ps->clear) {
+        if (!glr_has_texture(x->serial)) glr_texture(x->serial, x->pw, x->ph, x->pix);
+        g.tex_serial = x->serial;
+        g.tex_linear = (uint8_t)x->linear;
+        g.tex_clamp_u = (uint8_t)x->clamp_u;
+        g.tex_clamp_v = (uint8_t)x->clamp_v;
+        g.tex_func = (uint8_t)x->func;
+        g.tex_rgba = (uint8_t)x->rgba;
+        g.tex_dbl = (uint8_t)x->dbl;
+        g.env = (uint32_t)x->env[0] | (uint32_t)x->env[1] << 8 | (uint32_t)x->env[2] << 16;
+    }
+    g.alpha_test = (uint8_t)ps->alpha_test; g.at_func = (uint8_t)ps->at_func;
+    g.at_ref = (uint8_t)ps->at_ref; g.at_mask = (uint8_t)ps->at_mask;
+    g.z_test = (uint8_t)ps->z_test; g.z_func = (uint8_t)ps->z_func; g.z_write = (uint8_t)ps->z_write;
+    g.blend = (uint8_t)ps->blend; g.bl_src = (uint8_t)ps->bl_src; g.bl_dst = (uint8_t)ps->bl_dst;
+    g.bl_eq = (uint8_t)ps->bl_eq;
+    g.clear = (uint8_t)ps->clear; g.clear_color = (uint8_t)ps->clear_color;
+    g.clear_alpha = (uint8_t)ps->clear_alpha; g.clear_depth = (uint8_t)ps->clear_depth;
+    g.fix_a = ps->fix_a; g.fix_b = ps->fix_b; g.write_mask = ps->write_mask;
+    if (g_glr_have_last && !memcmp(&g, &g_glr_last, sizeof g)) return;
+    g_glr_last = g;
+    g_glr_have_last = 1;
+    glr_state(&g);
+}
+
+static inline uint8_t col8(float v) { return (uint8_t)(v < 0.f ? 0.f : v > 255.f ? 255.f : v); }
+
+// screen-space vertex -> clip space (FBOs cover 512 x 512 PSP pixels; depth 0..65535)
+static void glr_vtx(GlrVtx *o, float x, float y, float z, float w, float u, float v, const float *col) {
+    if (z < 0.f) z = 0.f;
+    if (z > 65535.f) z = 65535.f;
+    o->x = (x / 256.f - 1.f) * w;
+    o->y = (y / 256.f - 1.f) * w;
+    o->z = (z / 32767.5f - 1.f) * w;
+    o->w = w;
+    o->u = u;
+    o->v = v;
+    for (int k = 0; k < 4; k++) o->c[k] = col8(col[k]);
+}
+
+static void glr_submit(int kind, const SVtx *a, const SVtx *b, const SVtx *c, int flat) {
+    const PixState *p = g_cur_ps;
+    // texture coordinates: texels in through mode, else already normalized
+    float su = p->through && p->tex.w ? 1.f / (float)p->tex.w : 1.f;
+    float sv = p->through && p->tex.h ? 1.f / (float)p->tex.h : 1.f;
+    switch (kind) {
+    case JOB_TRI: {
+        GlrVtx *o = glr_vertices(GLR_TRIANGLES, 3);
+        const SVtx *v[3] = {a, b, c};
+        float fc[4];
+        for (int k = 0; k < 4; k++) fc[k] = c->c[k] / c->iw;
+        for (int i = 0; i < 3; i++) {
+            float w = 1.f / v[i]->iw, col[4];
+            for (int k = 0; k < 4; k++) col[k] = flat ? fc[k] : v[i]->c[k] * w;
+            glr_vtx(&o[i], v[i]->x, v[i]->y, v[i]->z, w, v[i]->u * w * su, v[i]->v * w * sv, col);
+        }
+        break;
+    }
+    case JOB_RECT: {  // corners a, b; colour and depth from b
+        GlrVtx *o = glr_vertices(GLR_TRIANGLES, 6);
+        float col[4], ua = a->u / a->iw * su, va = a->v / a->iw * sv, ub = b->u / b->iw * su, vb = b->v / b->iw * sv;
+        for (int k = 0; k < 4; k++) col[k] = b->c[k] / b->iw;
+        glr_vtx(&o[0], a->x, a->y, b->z, 1.f, ua, va, col);
+        glr_vtx(&o[1], b->x, a->y, b->z, 1.f, ub, va, col);
+        glr_vtx(&o[2], a->x, b->y, b->z, 1.f, ua, vb, col);
+        o[3] = o[1];
+        glr_vtx(&o[4], b->x, b->y, b->z, 1.f, ub, vb, col);
+        o[5] = o[2];
+        break;
+    }
+    case JOB_LINE: {
+        GlrVtx *o = glr_vertices(GLR_LINES, 2);
+        const SVtx *v[2] = {a, b};
+        for (int i = 0; i < 2; i++) {
+            float col[4];
+            for (int k = 0; k < 4; k++) col[k] = v[i]->c[k] / v[i]->iw;
+            glr_vtx(&o[i], v[i]->x + .5f, v[i]->y + .5f, v[i]->z, 1.f, v[i]->u / v[i]->iw * su,
+                    v[i]->v / v[i]->iw * sv, col);
+        }
+        break;
+    }
+    default: {  // point: a one-pixel quad
+        GlrVtx *o = glr_vertices(GLR_TRIANGLES, 6);
+        float col[4], u = a->u / a->iw * su, v = a->v / a->iw * sv, x = floorf(a->x), y = floorf(a->y);
+        for (int k = 0; k < 4; k++) col[k] = a->c[k] / a->iw;
+        glr_vtx(&o[0], x, y, a->z, 1.f, u, v, col);
+        glr_vtx(&o[1], x + 1, y, a->z, 1.f, u, v, col);
+        glr_vtx(&o[2], x, y + 1, a->z, 1.f, u, v, col);
+        o[3] = o[1];
+        glr_vtx(&o[4], x + 1, y + 1, a->z, 1.f, u, v, col);
+        o[5] = o[2];
+    }
+    }
+}
+
 // Snapshot the pixel state for the primitives that follow.
 static void begin_state(const PixState *ps) {
     g_cur_ps = ps;
+    if (g_glr_active) {
+        glr_begin(ps);
+        return;
+    }
     if (!g_nworkers) return;
     {
         const Target *t = &ps->tg;
@@ -1512,6 +1666,10 @@ static void begin_state(const PixState *ps) {
 }
 
 static void submit(int kind, const SVtx *a, const SVtx *b, const SVtx *c, int flat) {
+    if (g_glr_active) {
+        glr_submit(kind, a, b, c, flat);
+        return;
+    }
     if (!g_nworkers) {
         Job j = {.kind = (uint8_t)kind, .flat = (uint8_t)flat};
         j.v[0] = *a;

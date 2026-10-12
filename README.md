@@ -99,11 +99,13 @@ and their opacity; they also appear on touch laptops after the first touch.
 Press **F1** for the settings overlay: input devices and bindings (keyboard,
 gamepads, arcade sticks, hitboxes, with SOCD options) and texture packs.
 
-## Higher resolution
+## Graphics
 
-*F1 → Video* renders the game at 2×, 3× or 4× the PSP's 480×272. The
-renderer is software (on the CPU), so higher scales need a fast machine;
-2× runs at about 30 fps in matches on an 8-core Apple M1-class CPU for now.
+The game is drawn by the graphics card (OpenGL 3.3, or WebGL 2 in the browser):
+the CPU still decodes, transforms and lights the vertices exactly like the PSP's
+GE, the GPU rasterizes, textures and blends. *F1 → Video* sets the internal
+resolution (1× to 4×: 480×272 up to 1920×1088) and can switch to the software
+renderer (a CPU rasterizer, used when no OpenGL is available).
 
 ## Texture packs
 

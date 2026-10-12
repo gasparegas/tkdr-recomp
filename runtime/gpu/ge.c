@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "../hle/hle.h"
+#include "glr.h"
 #include "gpu.h"
 
 GeState g_ge;
@@ -348,6 +349,7 @@ static void *gpu_thread(void *arg) {
             raster_flush();
             gpu_resolve_all();  // and VRAM holds what was drawn at the internal resolution
             capture_end(l);
+            if (g_glr_active) glr_list_end();  // hand the list to the GPU side
         }
         g_gpu_busy_us += hle_time_us() - t0;
         pthread_mutex_lock(&g_lock);

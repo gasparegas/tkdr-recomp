@@ -1,5 +1,7 @@
 // SDL2 frontend: shows the PSP framebuffer, routes input through the
 // configurable mapping (runtime/ui), and draws the settings overlay (F1).
+// With an OpenGL (ES 3 / WebGL 2) context it also runs the GPU renderer
+// (gpu/glr.c); without one (offscreen previews) it falls back to SDL_Renderer.
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,12 +9,22 @@
 #include <emscripten.h>
 #endif
 
+#include "gpu/glr.h"
 #include "gpu/gpu.h"
 #include "hle/hle.h"
 
+#ifdef __EMSCRIPTEN__
+#include <GLES3/gl3.h>
+#elif defined(__APPLE__)
+#define GL_SILENCE_DEPRECATION
+#include <OpenGL/gl3.h>
+#else
+#include <GL/gl.h>
+#endif
+
 extern uint32_t g_buttons;
 
-void ui_init(SDL_Window *win, SDL_Renderer *ren);
+void ui_init(SDL_Window *win, SDL_Renderer *ren, int gles);
 int ui_event(SDL_Event *e);
 uint32_t ui_input_mask(void);
 void ui_draw(void);
@@ -48,7 +60,8 @@ static void audio_cb(void *ud, Uint8 *stream, int len) {
 }
 
 static SDL_Window *win;
-static SDL_Renderer *ren;
+static SDL_GLContext glc;  // GPU path
+static SDL_Renderer *ren;  // fallback path
 static SDL_Texture *tex;
 static int tex_scale;  // size of `tex`: 480x272 times this
 static uint32_t frames, last;
@@ -70,6 +83,57 @@ static void frame(void) {
     }
     if (!getenv("INPUT")) g_buttons = ui_input_mask();
 
+    // letterbox the 480x272 picture into the window
+    int ww, wh;
+    if (glc) SDL_GL_GetDrawableSize(win, &ww, &wh);
+    else SDL_GetRendererOutputSize(ren, &ww, &wh);
+    SDL_Rect dst = {0, 0, ww, ww * 272 / 480};
+    if (dst.h > wh) dst = (SDL_Rect){0, 0, wh * 480 / 272, wh};
+    dst.x = (ww - dst.w) / 2;
+    dst.y = (wh - dst.h) / 2;
+    int touch_visible(void);
+    if (touch_visible() && wh > ww) dst.y = 0;  // portrait phone: game on top, controls below
+
+    if (glc) {
+        glr_set_scale(gpu_render_scale());
+        glr_execute();
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, ww, wh);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        int gy = wh - dst.y - dst.h;  // GL counts rows from the bottom
+        if (!(g_glr_active && glr_present(g_display.fb_addr, dst.x, gy, dst.w, dst.h))) {
+            int scale = gpu_scanout_scaled(g_display.fb_addr, g_display.stride, (uint32_t)g_display.format, pixels, 4);
+            if (!scale) {
+                frontend_scanout(pixels);
+                scale = 1;
+            }
+            glr_present_pixels(pixels, 480 * scale, 272 * scale, dst.x, gy, dst.w, dst.h);
+        }
+        glViewport(0, 0, ww, wh);
+        ui_draw();
+        SDL_GL_SwapWindow(win);
+        // GL_SHOTS=dir: save what the GPU renderer drew for the displayed framebuffer every guest second
+        const char *shots = getenv("GL_SHOTS");
+        static int last_shot = -1;
+        int now = (int)(hle_time_us() / 1000000);
+        if (shots && now != last_shot && g_glr_active) {
+            last_shot = now;
+            static uint32_t rb[480 * 4 * 272 * 4];
+            int s;
+            if (glr_read_fb(g_display.fb_addr, rb, &s)) {
+                char path[512];
+                snprintf(path, sizeof path, "%s/gl_%03d.ppm", shots, now);
+                FILE *f = fopen(path, "wb");
+                if (f) {
+                    fprintf(f, "P6\n%d %d\n255\n", 480 * s, 272 * s);
+                    for (int i = 0; i < 480 * s * 272 * s; i++) fwrite(&rb[i], 1, 3, f);
+                    fclose(f);
+                }
+            }
+        }
+        goto stats;
+    }
     int scale = gpu_scanout_scaled(g_display.fb_addr, g_display.stride, (uint32_t)g_display.format, pixels, 4);
     if (!scale) {
         frontend_scanout(pixels);
@@ -82,21 +146,13 @@ static void frame(void) {
         tex_scale = scale;
     }
     SDL_UpdateTexture(tex, NULL, pixels, 480 * scale * 4);
-    // letterbox the 480x272 picture into the window
-    int ww, wh;
-    SDL_GetRendererOutputSize(ren, &ww, &wh);
-    SDL_Rect dst = {0, 0, ww, ww * 272 / 480};
-    if (dst.h > wh) dst = (SDL_Rect){0, 0, wh * 480 / 272, wh};
-    dst.x = (ww - dst.w) / 2;
-    dst.y = (wh - dst.h) / 2;
-    int touch_visible(void);
-    if (touch_visible() && wh > ww) dst.y = 0;  // portrait phone: game on top, controls below
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
     SDL_RenderCopy(ren, tex, NULL, &dst);
     ui_draw();
     SDL_RenderPresent(ren);
 
+stats:
     frames++;
     if (SDL_GetTicks() - last >= 1000) {
         extern uint32_t g_frames_presented;
@@ -108,6 +164,7 @@ static void frame(void) {
         g_fps_display = (int)frames;
         last_presented = g_frames_presented;
         SDL_SetWindowTitle(win, title);
+        if (getenv("FPS")) fprintf(stderr, "t=%d %s\n", (int)(hle_time_us() / 1000000), title);
         frames = 0;
         last = SDL_GetTicks();
     }
@@ -135,10 +192,46 @@ void frontend_run(void) {
     }
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (getenv("UI_PREVIEW")) SDL_SetHint(SDL_HINT_VIDEODRIVER, "offscreen");
-    win = SDL_CreateWindow("tkdr", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 544,
-                           SDL_WINDOW_RESIZABLE | (getenv("UI_PREVIEW") ? 0 : SDL_WINDOW_ALLOW_HIGHDPI));
-    ren = SDL_CreateRenderer(win, -1, getenv("UI_PREVIEW") ? SDL_RENDERER_SOFTWARE : SDL_RENDERER_PRESENTVSYNC);
-    ui_init(win, ren);
+    int gles = 0;
+    if (!getenv("UI_PREVIEW") && !getenv("NO_GL")) {  // OpenGL ES 3 (WebGL 2) on the web, GL 3.3 core natively
+#ifdef __EMSCRIPTEN__
+        gles = 1;
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#else
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+#endif
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        // HIDDEN_WINDOW=1: GPU renderer without showing a window (tests with GL_SHOTS)
+        win = SDL_CreateWindow("tkdr", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 544,
+                               SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_OPENGL |
+                                   (getenv("HIDDEN_WINDOW") ? SDL_WINDOW_HIDDEN : 0));
+        if (win) glc = SDL_GL_CreateContext(win);
+        if (glc) {
+            SDL_GL_MakeCurrent(win, glc);
+            SDL_GL_SetSwapInterval(1);
+            if (!glr_init(gles)) {
+                SDL_GL_DeleteContext(glc);
+                glc = NULL;
+            }
+        }
+        if (!glc) {
+            fprintf(stderr, "no OpenGL (%s): software path\n", SDL_GetError());
+            if (win) SDL_DestroyWindow(win);
+            win = NULL;
+        }
+    }
+    if (!glc) {
+        win = SDL_CreateWindow("tkdr", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 544,
+                               SDL_WINDOW_RESIZABLE | (getenv("UI_PREVIEW") ? 0 : SDL_WINDOW_ALLOW_HIGHDPI));
+        ren = SDL_CreateRenderer(win, -1, getenv("UI_PREVIEW") ? SDL_RENDERER_SOFTWARE : SDL_RENDERER_PRESENTVSYNC);
+    }
+    ui_init(win, ren, gles);
+    gpu_glr_available(glc != NULL);
     SDL_AudioSpec want = {.freq = 44100, .format = AUDIO_S16SYS, .channels = 2, .samples = 1024, .callback = audio_cb};
     SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
     if (dev) SDL_PauseAudioDevice(dev, 0);
