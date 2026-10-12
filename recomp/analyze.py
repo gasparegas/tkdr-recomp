@@ -118,6 +118,23 @@ class Program:
             if k >= 0 and eh[k][0] < a < eh[k][1]:
                 del starts[a]
                 self.internal_labels.add(a)
+        # Cross-jumping: GCC lets functions jump (j / branches) into code of
+        # another function, typically a shared epilogue. Every such target
+        # becomes an entry point of its own ("fragment"); repeat until stable.
+        while True:
+            ordered = sorted(starts)
+            added = 0
+            for i in self.insns.values():
+                if not (i.op == "j" or i.is_branch) or not self.in_text(i.target):
+                    continue
+                k = bisect.bisect_right(ordered, i.addr) - 1
+                lo = ordered[k] if k >= 0 else self.text_start
+                hi = ordered[k + 1] if k + 1 < len(ordered) else self.text_end
+                if not lo <= i.target < hi and i.target not in starts:
+                    starts[i.target] = "fragment"
+                    added += 1
+            if not added:
+                break
         self.func_starts = starts
         ordered = sorted(starts)
         self.functions = [(a, (ordered[k + 1] if k + 1 < len(ordered) else self.text_end) - a)

@@ -113,6 +113,21 @@ void call_indirect(Ctx *c, uint32_t addr) {
 void recomp_probe(Ctx *c, uint32_t func) {
     fprintf(stderr, "probe f_%08X a0=%08X a1=%08X a2=%08X a3=%08X ra=%08X sp=%08X\n", func, c->r[4], c->r[5],
             c->r[6], c->r[7], c->r[31], c->r[29]);
+    // PROBE_CHAIN="6:84:440": start from register 6, then follow mem[v + offset]
+    const char *chain = getenv("PROBE_CHAIN");
+    if (chain) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "%s", chain);
+        char *sp, *t = strtok_r(buf, ":", &sp);
+        uint32_t v = c->r[atoi(t) & 31];
+        fprintf(stderr, "  chain r%s=%08X", t, v);
+        while ((t = strtok_r(NULL, ":", &sp))) {
+            uint32_t a = v + (uint32_t)atoi(t);
+            v = (a & 0x1FFFFFFF) < GUEST_MEM_SIZE - 4 ? mem_r32(a) : 0xDEADBEEF;
+            fprintf(stderr, " -> [+%s]=%08X", t, v);
+        }
+        fputc('\n', stderr);
+    }
 }
 
 void recomp_probe_ret(Ctx *c, uint32_t func) {

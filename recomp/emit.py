@@ -301,7 +301,7 @@ class FunctionEmitter:
             return f"if ({cond(i)}) {{ {pre}{ds} {go} }}"
         if link:
             return f"{{ int t = {cond(i)}; {pre}{ds} if (t) {{ {go} }} }}"
-        return f"{{ int t = {cond(i)}; {ds} if (t) {go} }}"
+        return f"{{ int t = {cond(i)}; {ds} if (t) {{ {go} }} }}"
 
 
 def write_if_changed(path, text):
