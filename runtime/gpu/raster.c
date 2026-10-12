@@ -285,9 +285,9 @@ typedef struct {
     float c[4];  // divided by w
 } SVtx;
 
-static void to_screen(const Vtx *v, SVtx *s, int through) {
+static void to_screen(const Vtx *v, SVtx *s, int through, int scale) {
     if (through) {
-        s->x = v->x; s->y = v->y; s->z = v->z; s->iw = 1.f;
+        s->x = v->x * (float)scale; s->y = v->y * (float)scale; s->z = v->z; s->iw = 1.f;
         s->u = v->u; s->v = v->v;
         memcpy(s->c, v->c, sizeof s->c);
         return;
@@ -296,6 +296,8 @@ static void to_screen(const Vtx *v, SVtx *s, int through) {
     float ox = (float)(R(GE_OFFSETX) & 0xFFFF) / 16.f, oy = (float)(R(GE_OFFSETY) & 0xFFFF) / 16.f;
     s->x = v->x * iw * ge_float(R(GE_VIEWPORTXSCALE)) + ge_float(R(GE_VIEWPORTXCENTER)) - ox;
     s->y = v->y * iw * ge_float(R(GE_VIEWPORTYSCALE)) + ge_float(R(GE_VIEWPORTYCENTER)) - oy;
+    s->x *= (float)scale;
+    s->y *= (float)scale;
     s->z = v->z * iw * ge_float(R(GE_VIEWPORTZSCALE)) + ge_float(R(GE_VIEWPORTZCENTER));
     s->iw = iw;
     s->u = v->u * iw;
@@ -307,7 +309,12 @@ static void to_screen(const Vtx *v, SVtx *s, int through) {
 
 typedef struct {
     uint32_t fb, fb_stride, fb_fmt, zb, zb_stride;
-    int sx1, sy1, sx2, sy2;  // scissor, inclusive
+    int sx1, sy1, sx2, sy2;  // scissor, inclusive (in drawing pixels: scaled with `scale`)
+    int scale;               // internal resolution multiplier for this target
+    uint32_t *scol;          // scaled color surface (decoded RGBA, quantized to fb_fmt), or NULL
+    uint16_t *sz;            // scaled depth surface, or NULL
+    uint8_t *cmark, *zmark;  // drawn-pixel marks (guest resolution) of those surfaces
+    int sw;                  // row length of scol/sz in pixels
 } Target;
 
 static void target(Target *t) {
@@ -320,13 +327,16 @@ static void target(Target *t) {
     t->sy1 = (int)(R(GE_SCISSOR1) >> 10 & 0x3FF);
     t->sx2 = (int)(R(GE_SCISSOR2) & 0x3FF);
     t->sy2 = (int)(R(GE_SCISSOR2) >> 10 & 0x3FF);
+    t->scale = 1;
+    t->scol = NULL;
+    t->sz = NULL;
+    t->cmark = t->zmark = NULL;
+    t->sw = 0;
 }
 
-static uint32_t fb_read(const Target *t, int x, int y) {
-    uint32_t a = t->fb + (uint32_t)(y * (int)t->fb_stride + x) * (t->fb_fmt == 3 ? 4 : 2);
-    if (t->fb_fmt == 3) return mem_r32(a);
-    uint32_t v = mem_r16(a), r, g, b, al;
-    switch (t->fb_fmt) {
+static uint32_t fb_decode16(uint32_t v, uint32_t fmt) {
+    uint32_t r, g, b, al;
+    switch (fmt) {
     case 0: r = (v & 31) << 3 | (v & 31) >> 2; g = (v >> 5 & 63) << 2 | (v >> 5 & 63) >> 4;
             b = (v >> 11 & 31) << 3 | (v >> 11 & 31) >> 2; al = 0; break;
     case 1: r = (v & 31) << 3 | (v & 31) >> 2; g = (v >> 5 & 31) << 3 | (v >> 5 & 31) >> 2;
@@ -336,6 +346,21 @@ static uint32_t fb_read(const Target *t, int x, int y) {
     return r | g << 8 | b << 16 | al << 24;
 }
 
+static uint32_t fb_encode16(uint32_t c, uint32_t fmt) {
+    uint32_t r = c & 0xFF, g = c >> 8 & 0xFF, b = c >> 16 & 0xFF, al = c >> 24;
+    switch (fmt) {
+    case 0: return r >> 3 | (g >> 2) << 5 | (b >> 3) << 11;
+    case 1: return r >> 3 | (g >> 3) << 5 | (b >> 3) << 10 | (al >= 0x80 ? 0x8000u : 0u);
+    default: return r >> 4 | (g >> 4) << 4 | (b >> 4) << 8 | (al >> 4) << 12;
+    }
+}
+
+static uint32_t fb_read(const Target *t, int x, int y) {
+    uint32_t a = t->fb + (uint32_t)(y * (int)t->fb_stride + x) * (t->fb_fmt == 3 ? 4 : 2);
+    if (t->fb_fmt == 3) return mem_r32(a);
+    return fb_decode16(mem_r16(a), t->fb_fmt);
+}
+
 static void fb_write(const Target *t, int x, int y, uint32_t c, uint32_t mask) {
     uint32_t a = t->fb + (uint32_t)(y * (int)t->fb_stride + x) * (t->fb_fmt == 3 ? 4 : 2);
     if (t->fb_fmt == 3) {
@@ -343,12 +368,7 @@ static void fb_write(const Target *t, int x, int y, uint32_t c, uint32_t mask) {
         mem_w32(a, c);
         return;
     }
-    uint32_t r = c & 0xFF, g = c >> 8 & 0xFF, b = c >> 16 & 0xFF, al = c >> 24, v;
-    switch (t->fb_fmt) {
-    case 0: v = r >> 3 | (g >> 2) << 5 | (b >> 3) << 11; break;
-    case 1: v = r >> 3 | (g >> 3) << 5 | (b >> 3) << 10 | (al >= 0x80 ? 0x8000u : 0u); break;
-    default: v = r >> 4 | (g >> 4) << 4 | (b >> 4) << 8 | (al >> 4) << 12; break;
-    }
+    uint32_t v = fb_encode16(c, t->fb_fmt);
     if (mask) {
         uint32_t old = mem_r16(a), m16;
         switch (t->fb_fmt) {
@@ -361,6 +381,330 @@ static void fb_write(const Target *t, int x, int y, uint32_t c, uint32_t mask) {
         v = (v & ~m16) | (old & m16);
     }
     mem_w16(a, (uint16_t)v);
+}
+
+// ---------------------------------------------------------------- internal resolution
+// With a render scale N > 1, color and depth targets are drawn into host-side
+// surfaces N times larger than the PSP's. Guest VRAM is kept coherent: when a
+// display list ends, or before something else reads the target (a texture, a
+// block transfer), the surface is downsampled into VRAM ("resolve"). If VRAM
+// changed behind our back (CPU writes, transfers, 1x drawing) the surface is
+// rebuilt from it before the next draw, detected by hashing.
+
+#define MAX_SURFS 12
+#define SURF_MAX_ROWS 512
+typedef struct {
+    uint32_t addr, stride, fmt;  // fmt 0..3 color, 4 depth
+    int rows, scale;              // guest rows covered
+    void *pix;                    // uint32_t (color) or uint16_t (depth), (stride*scale) x (rows*scale)
+    uint8_t *mark;                // guest pixels drawn since the last resolve (stride x rows)
+    int dirty_lo, dirty_hi;       // guest rows drawn since the last resolve (lo > hi: clean)
+    int verified;                 // VRAM known to match the surface since the last resolve
+    uint64_t vram_hash;           // hash of the guest rows after the last resolve
+    uint32_t last_use;
+} Surf;
+
+static Surf g_surfs[MAX_SURFS];
+static int g_scale = 1, g_scale_req = 0;
+static uint32_t g_surf_tick;
+static pthread_mutex_t g_surf_lock = PTHREAD_MUTEX_INITIALIZER;  // vs. the frontend's scanout
+
+static uint64_t hash_bytes(const uint8_t *p, size_t n);
+
+void gpu_set_render_scale(int n) { g_scale_req = n < 1 ? 1 : n > 4 ? 4 : n; }
+int gpu_render_scale(void) { return g_scale_req ? g_scale_req : g_scale; }
+
+static uint32_t surf_bpp(const Surf *f) { return f->fmt == 3 ? 4 : 2; }
+static uint32_t surf_bytes(const Surf *f) { return f->stride * (uint32_t)f->rows * surf_bpp(f); }
+
+static uint64_t surf_vram_hash(const Surf *f) {
+    if ((f->addr & 0x1FFFFFFF) + surf_bytes(f) > GUEST_MEM_SIZE) return 0;
+    return hash_bytes(host(f->addr), surf_bytes(f));
+}
+
+// Surface <- VRAM (nearest).
+static void surf_upload(Surf *f) {
+    int S = f->scale, sw = (int)f->stride * S;
+    for (int y = 0; y < f->rows; y++)
+        for (int x = 0; x < (int)f->stride; x++) {
+            uint32_t a = f->addr + (uint32_t)(y * (int)f->stride + x) * surf_bpp(f);
+            if (f->fmt == 4) {
+                uint16_t z = mem_r16(a);
+                uint16_t *d = (uint16_t *)f->pix + (y * S) * sw + x * S;
+                for (int j = 0; j < S; j++)
+                    for (int i = 0; i < S; i++) d[j * sw + i] = z;
+            } else {
+                uint32_t c = f->fmt == 3 ? mem_r32(a) : fb_decode16(mem_r16(a), f->fmt);
+                uint32_t *d = (uint32_t *)f->pix + (y * S) * sw + x * S;
+                for (int j = 0; j < S; j++)
+                    for (int i = 0; i < S; i++) d[j * sw + i] = c;
+            }
+        }
+    f->verified = 1;
+    f->vram_hash = surf_vram_hash(f);
+}
+
+// VRAM <- surface (box filter) for the rows drawn since the last resolve.
+static void surf_resolve(Surf *f) {
+    if (f->dirty_lo > f->dirty_hi) return;
+    int S = f->scale, sw = (int)f->stride * S, n = S * S;
+    int lo = f->dirty_lo, hi = f->dirty_hi < f->rows - 1 ? f->dirty_hi : f->rows - 1;
+    // only pixels actually drawn: the CPU may have put other data in the rest meanwhile
+    for (int y = lo; y <= hi; y++)
+        for (int x = 0; x < (int)f->stride; x++) {
+            uint8_t *m = &f->mark[y * (int)f->stride + x];
+            if (!*m) continue;
+            *m = 0;
+            uint32_t a = f->addr + (uint32_t)(y * (int)f->stride + x) * surf_bpp(f);
+            if (f->fmt == 4) {
+                mem_w16(a, ((uint16_t *)f->pix)[(y * S) * sw + x * S]);
+                continue;
+            }
+            const uint32_t *src = (const uint32_t *)f->pix + (y * S) * sw + x * S;
+            uint32_t acc[4] = {0, 0, 0, 0};
+            for (int j = 0; j < S; j++)
+                for (int i = 0; i < S; i++) {
+                    uint32_t c = src[j * sw + i];
+                    acc[0] += c & 0xFF; acc[1] += c >> 8 & 0xFF; acc[2] += c >> 16 & 0xFF; acc[3] += c >> 24;
+                }
+            uint32_t c = (acc[0] / n) | (acc[1] / n) << 8 | (acc[2] / n) << 16 | (acc[3] / n) << 24;
+            if (f->fmt == 3) mem_w32(a, c);
+            else mem_w16(a, (uint16_t)fb_encode16(c, f->fmt));
+        }
+    f->dirty_lo = 1 << 30;
+    f->dirty_hi = -1;
+    f->vram_hash = surf_vram_hash(f);
+    f->verified = 0;  // check VRAM again before the next draw
+}
+
+static void surf_drop(Surf *f) {
+    surf_resolve(f);
+    free(f->pix);
+    free(f->mark);
+    memset(f, 0, sizeof *f);
+}
+
+// Resolve every surface overlapping [lo, hi) (something is about to read it).
+static void surf_resolve_range(uint32_t lo, uint32_t hi) {
+    lo &= 0x1FFFFFFF;
+    hi &= 0x1FFFFFFF;
+    for (int k = 0; k < MAX_SURFS; k++) {
+        Surf *f = &g_surfs[k];
+        uint32_t a = f->addr & 0x1FFFFFFF;
+        if (f->pix && f->dirty_lo <= f->dirty_hi && lo < a + surf_bytes(f) && a < hi) {
+            raster_flush();
+            pthread_mutex_lock(&g_surf_lock);
+            surf_resolve(f);
+            pthread_mutex_unlock(&g_surf_lock);
+        }
+    }
+}
+
+// VRAM in [lo, hi) is about to be written by something other than the
+// rasterizer: put pending pixels there first so the write lands on top.
+static void surf_vram_written(uint32_t lo, uint32_t hi, const void *except) {
+    surf_resolve_range(lo, hi);
+    lo &= 0x1FFFFFFF;
+    hi &= 0x1FFFFFFF;
+    for (int k = 0; k < MAX_SURFS; k++) {
+        Surf *f = &g_surfs[k];
+        uint32_t a = f->addr & 0x1FFFFFFF;
+        if (f->pix && f != except && lo < a + surf_bytes(f) && a < hi) f->verified = 0;
+    }
+}
+
+// The color surface holding guest pixel (x, y) of a buffer at addr/stride, or NULL.
+static Surf *surf_at(uint32_t addr, uint32_t stride, uint32_t bpp, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                     int *sx, int *sy) {
+    uint32_t a0 = (addr & 0x1FFFFFFF) + (y * stride + x) * bpp;
+    for (int k = 0; k < MAX_SURFS; k++) {
+        Surf *f = &g_surfs[k];
+        if (!f->pix || f->fmt == 4 || f->stride != stride || surf_bpp(f) != bpp) continue;
+        uint32_t fa = f->addr & 0x1FFFFFFF;
+        if (a0 < fa || (a0 - fa) % bpp) continue;
+        uint32_t off = (a0 - fa) / bpp, ry = off / stride, rx = off % stride;
+        if (rx + w > stride || ry + h > (uint32_t)f->rows) continue;
+        *sx = (int)rx;
+        *sy = (int)ry;
+        return f;
+    }
+    return NULL;
+}
+
+// Block transfer into a surface (already done in VRAM): apply it to the surface
+// too, at full resolution when the source is a surface, instead of letting the
+// whole surface be rebuilt from VRAM. Returns 1 if handled.
+static Surf *g_transfer_target;  // the surface surf_transfer updated
+
+static int surf_transfer(uint32_t src, uint32_t sstride, uint32_t sx, uint32_t sy, uint32_t dst, uint32_t dstride,
+                         uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t bpp) {
+    int fx, fy, gx, gy;
+    Surf *d = surf_at(dst, dstride, bpp, dx, dy, w, h, &fx, &fy);
+    g_transfer_target = d;
+    if (!d) return 0;
+    Surf *sf = surf_at(src, sstride, bpp, sx, sy, w, h, &gx, &gy);
+    if (sf && (sf->scale != d->scale || sf->fmt != d->fmt)) sf = NULL;
+    int S = d->scale, dw = (int)d->stride * S;
+    pthread_mutex_lock(&g_surf_lock);
+    if (sf) {
+        int sw = (int)sf->stride * S;
+        for (int y = 0; y < (int)h * S; y++)
+            memmove((uint32_t *)d->pix + (fy * S + y) * dw + fx * S, (uint32_t *)sf->pix + (gy * S + y) * sw + gx * S,
+                    (size_t)w * (size_t)S * 4);
+    } else {
+        for (int y = 0; y < (int)h; y++)
+            for (int x = 0; x < (int)w; x++) {
+                uint32_t a = d->addr + (uint32_t)((fy + y) * (int)d->stride + fx + x) * bpp;
+                uint32_t c = d->fmt == 3 ? mem_r32(a) : fb_decode16(mem_r16(a), d->fmt);
+                uint32_t *o = (uint32_t *)d->pix + ((fy + y) * S) * dw + (fx + x) * S;
+                for (int j = 0; j < S; j++)
+                    for (int i = 0; i < S; i++) o[j * dw + i] = c;
+            }
+    }
+    if (d->verified) d->vram_hash = surf_vram_hash(d);  // still in sync
+    pthread_mutex_unlock(&g_surf_lock);
+    return 1;
+}
+
+// End of a display list: make VRAM match what was drawn. Also applies a
+// pending scale change. Called on the GPU thread with the queue drained.
+void gpu_resolve_all(void) {
+    pthread_mutex_lock(&g_surf_lock);
+    if (g_scale_req && g_scale_req != g_scale) {
+        for (int k = 0; k < MAX_SURFS; k++)
+            if (g_surfs[k].pix) surf_drop(&g_surfs[k]);
+        g_scale = g_scale_req;
+        fprintf(stderr, "render scale %dx\n", g_scale);
+    }
+    g_scale_req = 0;
+    for (int k = 0; k < MAX_SURFS; k++)
+        if (g_surfs[k].pix) surf_resolve(&g_surfs[k]);
+    pthread_mutex_unlock(&g_surf_lock);
+}
+
+// The surface for (addr, stride, fmt) with at least `rows` rows; may flush.
+static Surf *surf_get(uint32_t addr, uint32_t stride, uint32_t fmt, int rows) {
+    rows = rows <= 272 ? 272 : (rows + 15) & ~15;
+    uint32_t bpp = fmt == 3 ? 4 : 2;
+    uint32_t lo = addr & 0x1FFFFFFF, hi = lo + stride * (uint32_t)rows * bpp;
+    Surf *hit = NULL, *free_slot = NULL, *lru = NULL;
+    for (int k = 0; k < MAX_SURFS; k++) {
+        Surf *f = &g_surfs[k];
+        if (!f->pix) {
+            if (!free_slot) free_slot = f;
+            continue;
+        }
+        if (f->addr == addr && f->stride == stride && f->fmt == fmt && f->rows >= rows && f->scale == g_scale) {
+            hit = f;
+            continue;
+        }
+        if (!lru || f->last_use < lru->last_use) lru = f;
+    }
+    // anything else covering the same memory goes (VRAM keeps its pixels)
+    for (int k = 0; k < MAX_SURFS; k++) {
+        Surf *f = &g_surfs[k];
+        uint32_t a = f->addr & 0x1FFFFFFF;
+        if (f->pix && f != hit && lo < a + surf_bytes(f) && a < hi) {
+            raster_flush();
+            pthread_mutex_lock(&g_surf_lock);
+            surf_drop(f);
+            pthread_mutex_unlock(&g_surf_lock);
+            if (!free_slot) free_slot = f;
+        }
+    }
+    if (hit) {
+        if (!hit->verified) {
+            if (surf_vram_hash(hit) != hit->vram_hash) {
+                raster_flush();
+                pthread_mutex_lock(&g_surf_lock);
+                surf_upload(hit);
+                pthread_mutex_unlock(&g_surf_lock);
+            }
+            hit->verified = 1;
+        }
+        hit->last_use = ++g_surf_tick;
+        return hit;
+    }
+    Surf *f = free_slot;
+    if (!f) {
+        raster_flush();
+        pthread_mutex_lock(&g_surf_lock);
+        surf_drop(lru);
+        pthread_mutex_unlock(&g_surf_lock);
+        f = lru;
+    }
+    size_t n = (size_t)stride * (size_t)g_scale * (size_t)rows * (size_t)g_scale;
+    void *pix = malloc(n * (fmt == 4 ? 2 : 4));
+    uint8_t *mark = calloc((size_t)stride * (size_t)rows, 1);
+    if (!pix || !mark) {
+        free(pix);
+        free(mark);
+        return NULL;
+    }
+    pthread_mutex_lock(&g_surf_lock);
+    *f = (Surf){.addr = addr, .stride = stride, .fmt = fmt, .rows = rows, .scale = g_scale, .pix = pix, .mark = mark,
+                .dirty_lo = 1 << 30, .dirty_hi = -1, .last_use = ++g_surf_tick};
+    surf_upload(f);
+    pthread_mutex_unlock(&g_surf_lock);
+    return f;
+}
+
+// Attach scaled surfaces to a target about to be drawn (GPU thread).
+static void target_scale(Target *t, int uses_depth) {
+    if (g_scale <= 1 || t->fb_stride == 0 || t->sy2 >= SURF_MAX_ROWS) return;
+    int rows = t->sy2 + 1;
+    Surf *c = surf_get(t->fb, t->fb_stride, t->fb_fmt, rows);
+    if (!c) return;
+    Surf *z = NULL;
+    if (uses_depth && t->zb_stride) {
+        z = surf_get(t->zb, t->zb_stride, 4, rows);
+        if (!z || t->zb_stride != t->fb_stride) return;  // keep it simple: one row length
+    }
+    // surf_get may have dropped c while making room for z
+    if (c->addr != t->fb || c->fmt != t->fb_fmt || !c->pix) return;
+    int S = g_scale;
+    t->scale = S;
+    t->scol = (uint32_t *)c->pix;
+    t->sz = z ? (uint16_t *)z->pix : NULL;
+    t->cmark = c->mark;
+    t->zmark = z ? z->mark : NULL;
+    t->sw = (int)t->fb_stride * S;
+    t->sx1 *= S;
+    t->sy1 *= S;
+    t->sx2 = (t->sx2 + 1) * S - 1;
+    t->sy2 = (t->sy2 + 1) * S - 1;
+    // the surfaces end where the buffer does (VRAM would wrap; we must not overrun)
+    if (t->sx2 > (int)t->fb_stride * S - 1) t->sx2 = (int)t->fb_stride * S - 1;
+    if (t->sy2 > c->rows * S - 1) t->sy2 = c->rows * S - 1;
+    if (z && t->sy2 > z->rows * S - 1) t->sy2 = z->rows * S - 1;
+    int lo = t->sy1 / S, hi = t->sy2 / S;
+    if (lo < c->dirty_lo) c->dirty_lo = lo;
+    if (hi > c->dirty_hi) c->dirty_hi = hi;
+    if (z) {
+        if (lo < z->dirty_lo) z->dirty_lo = lo;
+        if (hi > z->dirty_hi) z->dirty_hi = hi;
+    }
+}
+
+// Frontend: copy the displayed framebuffer at full internal resolution if a
+// surface for it is in sync with VRAM. Returns the scale used (0: none).
+int gpu_scanout_scaled(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t *out, int max_scale) {
+    int got = 0;
+    pthread_mutex_lock(&g_surf_lock);
+    for (int k = 0; k < MAX_SURFS && !got; k++) {
+        Surf *f = &g_surfs[k];
+        if (!f->pix || f->addr != addr || f->stride != stride || f->fmt != fmt || f->scale > max_scale) continue;
+        if (f->rows < 272 || surf_vram_hash(f) != f->vram_hash) break;
+        int S = f->scale, sw = (int)stride * S;
+        for (int y = 0; y < 272 * S; y++) {
+            const uint32_t *src = (const uint32_t *)f->pix + y * sw;
+            uint32_t *dst = out + y * 480 * S;
+            for (int x = 0; x < 480 * S; x++) dst[x] = src[x] | 0xFF000000u;
+        }
+        got = S;
+    }
+    pthread_mutex_unlock(&g_surf_lock);
+    return got;
 }
 
 // ---------------------------------------------------------------- textures
@@ -558,6 +902,26 @@ static void flush_if_rendering_to(uint32_t lo, uint32_t hi) {
         }
 }
 
+// Texel buffers replaced while primitives using them may still be queued;
+// freed once the queue has drained (raster_flush).
+#define MAX_RETIRED 256
+static void *g_retired[MAX_RETIRED];
+static int g_nretired;
+static size_t g_retired_bytes;
+
+static void tex_free_retired(void) {
+    for (int k = 0; k < g_nretired; k++) free(g_retired[k]);
+    g_nretired = 0;
+    g_retired_bytes = 0;
+}
+
+static void tex_retire(void *pix, int texels) {
+    if (!pix) return;
+    if (g_nretired == MAX_RETIRED || g_retired_bytes > (64u << 20)) raster_flush();  // frees them
+    g_retired[g_nretired++] = pix;
+    g_retired_bytes += (size_t)texels * 4;
+}
+
 static void tex_use(TexState *t, const TexEntry *e) {
     t->pix = e->pix;
     t->pw = e->pw;
@@ -583,17 +947,17 @@ static void tex_cache_lookup(TexState *t) {
     }
     uint32_t n = tex_bytes(t);
     flush_if_rendering_to(t->addr, t->addr + n);  // the source may still be being drawn
+    surf_resolve_range(t->addr, t->addr + n);     // or only exist at the internal resolution
     uint64_t h = (t->addr & 0x1FFFFFFF) + n <= GUEST_MEM_SIZE ? hash_bytes(host(t->addr), n) : 0;
     if (same_key && e->data_hash == h) {
         e->gen = g_tex_gen;
         tex_use(t, e);
         return;
     }
-    if (!e->pix || e->cap < t->w * t->h) {
-        free(e->pix);
-        e->pix = malloc((size_t)t->w * (size_t)t->h * 4);
-        e->cap = t->w * t->h;
-    }
+    // queued primitives may still sample the old pixels: never reuse them in place
+    tex_retire(e->pix, e->cap);
+    e->pix = malloc((size_t)t->w * (size_t)t->h * 4);
+    e->cap = t->w * t->h;
     t->pix = NULL;  // fetch() decodes from guest memory
     for (int y = 0; y < t->h; y++)
         for (int x = 0; x < t->w; x++) e->pix[y * t->w + x] = fetch(t, x, y);
@@ -660,6 +1024,8 @@ static void pix_state(PixState *p, int through) {
     if (p->tex.enabled) tex_cache_lookup(&p->tex);
     p->through = through;
     uint32_t cm = R(GE_CLEARMODE);
+    int uses_depth = (R(GE_ZTESTENABLE) & 1) || ((cm & 1) && (cm >> 10 & 1));
+    target_scale(&p->tg, uses_depth);
     p->clear = cm & 1;
     p->clear_color = cm >> 8 & 1;
     p->clear_alpha = cm >> 9 & 1;
@@ -720,10 +1086,37 @@ static __thread int tl_band;
 // `band` is read from tl_band once per primitive: thread-locals are slow on some platforms
 static inline int owns_row(int y, int band) { return g_nbands == 1 || ((y >> 3) % g_nbands) == band; }
 
+// Pixel access: VRAM, or the scaled surfaces when the target has them.
+static inline uint32_t px_read(const Target *t, int x, int y) {
+    return t->scol ? t->scol[y * t->sw + x] : fb_read(t, x, y);
+}
+static inline void px_write(const Target *t, int x, int y, uint32_t c, uint32_t mask) {
+    if (!t->scol) {
+        fb_write(t, x, y, c, mask);
+        return;
+    }
+    uint32_t *d = &t->scol[y * t->sw + x];
+    if (mask) c = (c & ~mask) | (*d & mask);
+    // store what VRAM would hold, so blending and readback match 1x
+    if (t->fb_fmt != 3) c = fb_decode16(fb_encode16(c, t->fb_fmt), t->fb_fmt);
+    *d = c;
+    t->cmark[(y / t->scale) * (int)t->fb_stride + x / t->scale] = 1;
+}
+static inline int z_read(const Target *t, uint32_t za, int x, int y) {
+    return t->sz ? t->sz[y * t->sw + x] : mem_r16(za);
+}
+static inline void z_write(const Target *t, uint32_t za, int x, int y, int z) {
+    if (t->sz) {
+        t->sz[y * t->sw + x] = (uint16_t)z;
+        t->zmark[(y / t->scale) * (int)t->fb_stride + x / t->scale] = 1;
+    } else if (!t->scol) mem_w16(za, (uint16_t)z);
+}
+
 // Shade one pixel. col: interpolated vertex color; uv in texels.
 static void shade(const PixState *p, int x, int y, float z, const float *col, float u, float v) {
     const Target *t = &p->tg;
-    if (x < t->sx1 || x > t->sx2 || y < t->sy1 || y > t->sy2 || x < 0 || y < 0 || x >= 1024 || y >= 1024) return;
+    if (x < t->sx1 || x > t->sx2 || y < t->sy1 || y > t->sy2 || x < 0 || y < 0) return;
+    if (!t->scol && (x >= 1024 || y >= 1024)) return;
     uint32_t za = t->zb + (uint32_t)(y * (int)t->zb_stride + x) * 2;
     int zi = (int)(z < 0.f ? 0.f : z > 65535.f ? 65535.f : z);
 
@@ -731,15 +1124,15 @@ static void shade(const PixState *p, int x, int y, float z, const float *col, fl
         uint32_t c = (uint32_t)clamp255(col[0]) | (uint32_t)clamp255(col[1]) << 8 |
                      (uint32_t)clamp255(col[2]) << 16 | (uint32_t)clamp255(col[3]) << 24;
         uint32_t keep = (p->clear_color ? 0 : 0xFFFFFFu) | (p->clear_alpha ? 0 : 0xFF000000u);
-        if (keep != 0xFFFFFFFFu) fb_write(t, x, y, c, keep);
-        if (p->clear_depth) mem_w16(za, (uint16_t)zi);
+        if (keep != 0xFFFFFFFFu) px_write(t, x, y, c, keep);
+        if (p->clear_depth) z_write(t, za, x, y, zi);
         return;
     }
 
     // early depth test: skip texturing hidden pixels (alpha test must come first otherwise)
     int z_done = 0;
     if (p->z_test && !p->alpha_test) {
-        if (!cmp(p->z_func, zi, mem_r16(za))) return;
+        if (!cmp(p->z_func, zi, z_read(t, za, x, y))) return;
         z_done = 1;
     }
 
@@ -778,10 +1171,10 @@ static void shade(const PixState *p, int x, int y, float z, const float *col, fl
         if (!cmp(p->at_func, a, ref)) return;
     }
     if (p->z_test && !z_done) {
-        if (!cmp(p->z_func, zi, mem_r16(za))) return;
+        if (!cmp(p->z_func, zi, z_read(t, za, x, y))) return;
     }
     if (p->blend) {
-        uint32_t dv = fb_read(t, x, y);
+        uint32_t dv = px_read(t, x, y);
         float d[4] = {(float)(dv & 0xFF), (float)(dv >> 8 & 0xFF), (float)(dv >> 16 & 0xFF), (float)(dv >> 24)};
         float out[3];
         for (int i = 0; i < 3; i++) {
@@ -802,8 +1195,8 @@ static void shade(const PixState *p, int x, int y, float z, const float *col, fl
     uint32_t px = (uint32_t)clamp255(c[0]) | (uint32_t)clamp255(c[1]) << 8 | (uint32_t)clamp255(c[2]) << 16 |
                   (uint32_t)clamp255(c[3]) << 24;
     uint32_t mask = p->write_mask | (p->blend ? 0xFF000000u : 0);
-    fb_write(t, x, y, px, mask);
-    if (p->z_write && p->z_test) mem_w16(za, (uint16_t)zi);
+    px_write(t, x, y, px, mask);
+    if (p->z_write && p->z_test) z_write(t, za, x, y, zi);
 }
 
 // ---------------------------------------------------------------- primitives
@@ -820,7 +1213,7 @@ static void draw_triangle(const PixState *p, const SVtx *v0, const SVtx *v1, con
     float miny = fminf(v0->y, fminf(v1->y, v2->y)), maxy = fmaxf(v0->y, fmaxf(v1->y, v2->y));
     int x0 = (int)fmaxf(floorf(minx), (float)t->sx1), x1 = (int)fminf(ceilf(maxx), (float)t->sx2);
     int y0 = (int)fmaxf(floorf(miny), (float)t->sy1), y1 = (int)fminf(ceilf(maxy), (float)t->sy2);
-    if (x1 < x0 || y1 < y0 || x1 - x0 > 2048 || y1 - y0 > 2048) return;
+    if (x1 < x0 || y1 < y0 || x1 - x0 > 2048 * t->scale || y1 - y0 > 2048 * t->scale) return;
     float inv = 1.f / area;
     // barycentric weights are affine in screen space: w(x,y) = w0 + dx*x + dy*y
     float e0x = -(v2->y - v1->y) * inv, e0y = (v2->x - v1->x) * inv;
@@ -889,13 +1282,24 @@ static void draw_rect(const PixState *p, const SVtx *a, const SVtx *b) {
 
 static void draw_line(const PixState *p, const SVtx *a, const SVtx *b) {
     float dx = b->x - a->x, dy = b->y - a->y;
-    int n = (int)fmaxf(fabsf(dx), fabsf(dy));
+    int n = (int)fmaxf(fabsf(dx), fabsf(dy)), S = p->tg.scale;
     for (int i = 0; i <= n; i++) {
         float t = n ? (float)i / (float)n : 0.f, col[4];
         for (int k = 0; k < 4; k++) col[k] = (a->c[k] / a->iw) * (1 - t) + (b->c[k] / b->iw) * t;
-        int py = (int)(a->y + dy * t);
-        if (owns_row(py, tl_band)) shade(p, (int)(a->x + dx * t), py, a->z + (b->z - a->z) * t, col, a->u, a->v);
+        int px = (int)(a->x + dx * t), py = (int)(a->y + dy * t);
+        for (int j = 0; j < S; j++)  // keep the 1-PSP-pixel thickness
+            if (owns_row(py + j, tl_band))
+                for (int k = 0; k < S; k++) shade(p, px + k, py + j, a->z + (b->z - a->z) * t, col, a->u, a->v);
     }
+}
+
+static void draw_point(const PixState *p, const SVtx *a) {
+    float col[4];
+    for (int k = 0; k < 4; k++) col[k] = a->c[k] / a->iw;
+    int S = p->tg.scale, x = (int)a->x, y = (int)a->y;
+    for (int j = 0; j < S; j++)
+        if (owns_row(y + j, tl_band))
+            for (int i = 0; i < S; i++) shade(p, x + i, y + j, a->z, col, a->u, a->v);
 }
 
 // ---------------------------------------------------------------- job queue
@@ -927,12 +1331,7 @@ static void run_job(const Job *j) {
     case JOB_TRI: draw_triangle(p, &j->v[0], &j->v[1], &j->v[2], j->flat); break;
     case JOB_RECT: draw_rect(p, &j->v[0], &j->v[1]); break;
     case JOB_LINE: draw_line(p, &j->v[0], &j->v[1]); break;
-    default: {
-        float col[4];
-        for (int k = 0; k < 4; k++) col[k] = j->v[0].c[k] / j->v[0].iw;
-        if (owns_row((int)j->v[0].y, tl_band))
-            shade(p, (int)j->v[0].x, (int)j->v[0].y, j->v[0].z, col, j->v[0].u, j->v[0].v);
-    }
+    default: draw_point(p, &j->v[0]); break;
     }
 }
 
@@ -966,13 +1365,17 @@ uint64_t g_flush_wait_us, g_prim_us;  // stats
 uint64_t hle_time_us(void);
 
 void raster_flush(void) {
-    if (!g_nworkers) return;
+    if (!g_nworkers) {  // everything was drawn inline already
+        tex_free_retired();
+        return;
+    }
     kick();
     uint64_t t0 = hle_time_us();
     pthread_mutex_lock(&g_q_lock);
     while (min_read() != g_job_w) pthread_cond_wait(&g_q_done, &g_q_lock);
     pthread_mutex_unlock(&g_q_lock);
     g_n_pending_targets = 0;
+    tex_free_retired();
     g_flush_wait_us += hle_time_us() - t0;
 }
 
@@ -1001,7 +1404,7 @@ static void begin_state(const PixState *ps) {
     if (!g_nworkers) return;
     {
         const Target *t = &ps->tg;
-        uint32_t bpp = t->fb_fmt == 3 ? 4 : 2, rows = (uint32_t)t->sy2 + 1;
+        uint32_t bpp = t->fb_fmt == 3 ? 4 : 2, rows = (uint32_t)(t->sy2 / t->scale) + 1;
         note_target(t->fb, t->fb + t->fb_stride * rows * bpp);
         if (ps->z_test || ps->clear_depth) note_target(t->zb, t->zb + t->zb_stride * rows * 2);
     }
@@ -1026,11 +1429,7 @@ static void submit(int kind, const SVtx *a, const SVtx *b, const SVtx *c, int fl
         case JOB_TRI: draw_triangle(g_cur_ps, a, b, c, flat); break;
         case JOB_RECT: draw_rect(g_cur_ps, a, b); break;
         case JOB_LINE: draw_line(g_cur_ps, a, b); break;
-        default: {
-            float col[4];
-            for (int k = 0; k < 4; k++) col[k] = a->c[k] / a->iw;
-            shade(g_cur_ps, (int)a->x, (int)a->y, a->z, col, a->u, a->v);
-        }
+        default: draw_point(g_cur_ps, a); break;
         }
         return;
     }
@@ -1102,7 +1501,7 @@ static void emit_triangle(const PixState *p, const Vtx *a, const Vtx *b, const V
         if (n < 3) return;
     }
     SVtx s[8];
-    for (int i = 0; i < n; i++) to_screen(&poly[i], &s[i], p->through);
+    for (int i = 0; i < n; i++) to_screen(&poly[i], &s[i], p->through, p->tg.scale);
     if (!p->through && cull_reject(&s[0], &s[1], &s[2], odd)) return;
     for (int i = 1; i + 1 < n; i++) submit(JOB_TRI, &s[0], &s[i], &s[i + 1], flat);
 }
@@ -1149,15 +1548,15 @@ static void draw_prim(int prim, int count) {
     case 0:  // points
         for (int i = 0; i < count; i++) {
             SVtx s;
-            to_screen(&v[i], &s, f.through);
+            to_screen(&v[i], &s, f.through, ps.tg.scale);
             submit(JOB_POINT, &s, NULL, NULL, 0);
         }
         break;
     case 1: case 2:  // lines, line strip
         for (int i = 0; i + 1 < count; i += prim == 1 ? 2 : 1) {
             SVtx a, b;
-            to_screen(&v[i], &a, f.through);
-            to_screen(&v[i + 1], &b, f.through);
+            to_screen(&v[i], &a, f.through, ps.tg.scale);
+            to_screen(&v[i + 1], &b, f.through, ps.tg.scale);
             submit(JOB_LINE, &a, &b, NULL, 0);
         }
         break;
@@ -1173,8 +1572,8 @@ static void draw_prim(int prim, int count) {
     case 6:  // rectangles
         for (int i = 0; i + 1 < count; i += 2) {
             SVtx a, b;
-            to_screen(&v[i], &a, f.through);
-            to_screen(&v[i + 1], &b, f.through);
+            to_screen(&v[i], &a, f.through, ps.tg.scale);
+            to_screen(&v[i + 1], &b, f.through, ps.tg.scale);
             submit(JOB_RECT, &a, &b, NULL, 0);
         }
         break;
@@ -1197,9 +1596,13 @@ void gpu_block_transfer(void) {
     uint32_t dx = r[GE_TRANSFERDSTPOS] & 0x3FF, dy = (r[GE_TRANSFERDSTPOS] >> 10) & 0x3FF;
     uint32_t w = (r[GE_TRANSFERSIZE] & 0x3FF) + 1, h = ((r[GE_TRANSFERSIZE] >> 10) & 0x3FF) + 1;
     uint32_t bpp = (r[GE_TRANSFERSTART] & 1) ? 4 : 2;
+    surf_resolve_range(src + (sy * sstride + sx) * bpp, src + ((sy + h) * sstride) * bpp);
+    surf_resolve_range(dst + (dy * dstride + dx) * bpp, dst + ((dy + h) * dstride) * bpp);
     for (uint32_t y = 0; y < h; y++)
         memmove(host(dst + ((dy + y) * dstride + dx) * bpp), host(src + ((sy + y) * sstride + sx) * bpp),
                 w * bpp);
+    surf_transfer(src, sstride, sx, sy, dst, dstride, dx, dy, w, h, bpp);
+    surf_vram_written(dst + (dy * dstride + dx) * bpp, dst + ((dy + h) * dstride) * bpp, g_transfer_target);
 }
 
 // LOADCLUT: copy n*32 bytes of palette into the GE's internal palette.

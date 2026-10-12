@@ -1,5 +1,7 @@
 // Settings overlay (Dear ImGui), toggled with F1. For now: input configuration.
 #include <SDL.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "../../third_party/imgui/backends/imgui_impl_sdl2.h"
 #include "../../third_party/imgui/backends/imgui_impl_sdlrenderer2.h"
@@ -10,6 +12,7 @@ static SDL_Renderer *g_ren;
 static bool g_open;
 static int g_capture_action = -1;  // action waiting for an input to bind
 static bool g_capture_armed;  // wait until everything is released first
+static void video_load();
 
 extern "C" {
 
@@ -24,6 +27,7 @@ void ui_init(SDL_Window *win, SDL_Renderer *ren) {
     ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
     ImGui_ImplSDLRenderer2_Init(ren);
     input_load();
+    video_load();
 }
 
 int ui_menu_open(void) { return g_open; }
@@ -50,9 +54,44 @@ uint32_t ui_input_mask(void) { return g_open ? 0 : input_poll(); }
 static const char *k_socd_names[] = {"Last input wins", "Neutral", "First input wins", "Up wins (hitbox)", "Off"};
 
 extern "C" {
+void gpu_set_render_scale(int n);
+int gpu_render_scale(void);
+void web_persist(void);
 void texrep_request_reload(void);
 void texrep_request_dump(int on);
 void texrep_status(int *replacements, int *dumping, const char **dir);
+}
+
+// ms0/tkdr-video.cfg: "scale=N"
+static void video_load() {
+    if (getenv("RENDER_SCALE")) return;  // the command line wins
+    FILE *f = fopen("ms0/tkdr-video.cfg", "r");
+    if (!f) return;
+    int n;
+    if (fscanf(f, "scale=%d", &n) == 1) gpu_set_render_scale(n);
+    fclose(f);
+}
+
+static void video_save(int scale) {
+    FILE *f = fopen("ms0/tkdr-video.cfg", "w");
+    if (!f) return;
+    fprintf(f, "scale=%d\n", scale);
+    fclose(f);
+    web_persist();
+}
+
+static void video_tab() {
+    int cur = gpu_render_scale();
+    ImGui::Text("Internal resolution");
+    for (int n = 1; n <= 4; n++) {
+        char label[48];
+        snprintf(label, sizeof label, "%dx  (%dx%d)%s", n, 480 * n, 272 * n, n == 1 ? "  PSP" : "");
+        if (ImGui::RadioButton(label, cur == n)) {
+            gpu_set_render_scale(n);
+            video_save(n);
+        }
+    }
+    ImGui::TextDisabled("Higher scales need a faster CPU (software renderer).");
 }
 
 static void textures_tab() {
@@ -178,6 +217,10 @@ extern "C" void ui_draw(void) {
         if (ImGui::BeginTabBar("tabs")) {
             if (ImGui::BeginTabItem("Input")) {
                 input_tab();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Video")) {
+                video_tab();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Textures")) {

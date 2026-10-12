@@ -76,6 +76,12 @@ Gamepads work too (face buttons in the PSP layout; the left stick also drives th
 Press **F1** for the settings overlay: input devices and bindings (keyboard,
 gamepads, arcade sticks, hitboxes, with SOCD options) and texture packs.
 
+## Higher resolution
+
+*F1 → Video* renders the game at 2×, 3× or 4× the PSP's 480×272. The
+renderer is software (on the CPU), so higher scales need a fast machine;
+2× runs at about 30 fps in matches on an 8-core Apple M1-class CPU for now.
+
 ## Texture packs
 
 Packs made for PPSSPP work as they are: put `textures.ini` and the PNGs in

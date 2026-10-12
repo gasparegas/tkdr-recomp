@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "func_table.h"
+#include "gpu/gpu.h"
 #include "hle/hle.h"
 #include "image_base.h"
 #include "recomp.h"
@@ -59,14 +60,18 @@ void script_tick(void) {
 
 // SHOTS=dir: save the displayed framebuffer as dir/shot_NNN.ppm every second
 static void save_shot(const char *dir, int n) {
-    static uint32_t px[480 * 272];
+    static uint32_t px[480 * 4 * 272 * 4];
     char path[512];
     snprintf(path, sizeof path, "%s/shot_%03d.ppm", dir, n);
     FILE *f = fopen(path, "wb");
     if (!f) return;
-    frontend_scanout(px);
-    fprintf(f, "P6\n480 272\n255\n");
-    for (int i = 0; i < 480 * 272; i++) {
+    int S = gpu_scanout_scaled(g_display.fb_addr, g_display.stride, g_display.format, px, 4);
+    if (!S) {
+        frontend_scanout(px);
+        S = 1;
+    }
+    fprintf(f, "P6\n%d %d\n255\n", 480 * S, 272 * S);
+    for (int i = 0; i < 480 * S * 272 * S; i++) {
         uint8_t rgb[3] = {(uint8_t)px[i], (uint8_t)(px[i] >> 8), (uint8_t)(px[i] >> 16)};
         fwrite(rgb, 1, 3, f);
     }
@@ -198,6 +203,7 @@ int main(int argc, char **argv) {
     io_init(argv[2], "ms0");
 #endif
     g_hle_log = getenv("HLE_LOG") != NULL;
+    if (getenv("RENDER_SCALE")) gpu_set_render_scale(atoi(getenv("RENDER_SCALE")));
     if (getenv("TRACE_RA")) g_trace_ra = (uint32_t)strtoul(getenv("TRACE_RA"), NULL, 0);
 
     // user partition: everything after the loaded image up to the end of RAM

@@ -50,12 +50,13 @@ static void audio_cb(void *ud, Uint8 *stream, int len) {
 static SDL_Window *win;
 static SDL_Renderer *ren;
 static SDL_Texture *tex;
+static int tex_scale;  // size of `tex`: 480x272 times this
 static uint32_t frames, last;
 
 void script_tick(void);
 
 static void frame(void) {
-    static uint32_t pixels[480 * 272];
+    static uint32_t pixels[480 * 4 * 272 * 4];
     script_tick();
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -67,8 +68,18 @@ static void frame(void) {
     }
     if (!getenv("INPUT")) g_buttons = ui_input_mask();
 
-    frontend_scanout(pixels);
-    SDL_UpdateTexture(tex, NULL, pixels, 480 * 4);
+    int scale = gpu_scanout_scaled(g_display.fb_addr, g_display.stride, (uint32_t)g_display.format, pixels, 4);
+    if (!scale) {
+        frontend_scanout(pixels);
+        scale = 1;
+    }
+    if (scale != tex_scale) {
+        if (tex) SDL_DestroyTexture(tex);
+        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 480 * scale, 272 * scale);
+        SDL_SetTextureScaleMode(tex, scale > 1 ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        tex_scale = scale;
+    }
+    SDL_UpdateTexture(tex, NULL, pixels, 480 * scale * 4);
     // letterbox the 480x272 picture into the window
     int ww, wh;
     SDL_GetRendererOutputSize(ren, &ww, &wh);
@@ -117,7 +128,6 @@ void frontend_run(void) {
     win = SDL_CreateWindow("tkdr", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 544,
                            SDL_WINDOW_RESIZABLE | (getenv("UI_PREVIEW") ? 0 : SDL_WINDOW_ALLOW_HIGHDPI));
     ren = SDL_CreateRenderer(win, -1, getenv("UI_PREVIEW") ? SDL_RENDERER_SOFTWARE : SDL_RENDERER_PRESENTVSYNC);
-    tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 480, 272);
     ui_init(win, ren);
     SDL_AudioSpec want = {.freq = 44100, .format = AUDIO_S16SYS, .channels = 2, .samples = 1024, .callback = audio_cb};
     SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);

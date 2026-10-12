@@ -55,6 +55,7 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
 | `HEADLESS=1` | no window; with `RUN_SECONDS=n` exit after n guest seconds |
 | `TIME_SCALE=x`, `TIME_SCALE_UNTIL=s` | run guest time x times faster (until s seconds) |
 | `INPUT="118:START,118.3:"` | scripted buttons at guest times (also as URL params on the web) |
+| `RENDER_SCALE=n` | internal resolution 1..4 (overrides the F1 > Video setting) |
 | `TEX_DIR=dir` | texture pack folder (default `textures/ULUS10139`) |
 | `TEX_DUMP=1` | dump every new texture as PNG into `TEX_DIR/new/` (PPSSPP names) |
 | `SHOTS=dir` | dump the displayed framebuffer every guest second (PPM) |

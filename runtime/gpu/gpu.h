@@ -73,6 +73,11 @@ void gpu_load_clut(void);
 void gpu_tex_invalidate(void);
 void raster_flush(void);  // wait for queued primitives  // texture memory may have changed
 uint32_t gpu_stat_prims(void);
+// internal resolution (1..4); applied at the end of the next display list
+void gpu_set_render_scale(int n);
+int gpu_render_scale(void);
+void gpu_resolve_all(void);
+int gpu_scanout_scaled(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t *out, int max_scale);
 
 // texreplace.c: PPSSPP-compatible texture packs (TEX_DIR) and dumping (TEX_DUMP)
 uint32_t *texrep_lookup(uint32_t addr, int fmt, int w, int h, uint32_t texbufwidth, uint32_t texsize,
