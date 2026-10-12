@@ -311,6 +311,7 @@ typedef struct {
     uint32_t fb, fb_stride, fb_fmt, zb, zb_stride;
     int sx1, sy1, sx2, sy2;  // scissor, inclusive (in drawing pixels: scaled with `scale`)
     int scale;               // internal resolution multiplier for this target
+    int mshift;              // log2(scale) when it is a power of two, else -1
     uint32_t *scol;          // scaled color surface (decoded RGBA, quantized to fb_fmt), or NULL
     uint16_t *sz;            // scaled depth surface, or NULL
     uint8_t *cmark, *zmark;  // drawn-pixel marks (guest resolution) of those surfaces
@@ -328,6 +329,7 @@ static void target(Target *t) {
     t->sx2 = (int)(R(GE_SCISSOR2) & 0x3FF);
     t->sy2 = (int)(R(GE_SCISSOR2) >> 10 & 0x3FF);
     t->scale = 1;
+    t->mshift = 0;
     t->scol = NULL;
     t->sz = NULL;
     t->cmark = t->zmark = NULL;
@@ -352,6 +354,24 @@ static uint32_t fb_encode16(uint32_t c, uint32_t fmt) {
     case 0: return r >> 3 | (g >> 2) << 5 | (b >> 3) << 11;
     case 1: return r >> 3 | (g >> 3) << 5 | (b >> 3) << 10 | (al >= 0x80 ? 0x8000u : 0u);
     default: return r >> 4 | (g >> 4) << 4 | (b >> 4) << 8 | (al >> 4) << 12;
+    }
+}
+
+// fb_decode16(fb_encode16(c)), with masks: what a 16-bit pixel can hold.
+static inline uint32_t fb_quantize(uint32_t c, uint32_t fmt) {
+    switch (fmt) {
+    case 0: {  // 565, no alpha
+        uint32_t rb = c & 0xF800F8u, g = c & 0xFC00u;
+        return rb | (rb >> 5 & 0x070007u) | g | (g >> 6 & 0x300u);
+    }
+    case 1: {  // 5551
+        uint32_t rgb = c & 0xF8F8F8u;
+        return rgb | (rgb >> 5 & 0x070707u) | ((c & 0x80000000u) ? 0xFF000000u : 0u);
+    }
+    default: {  // 4444
+        uint32_t v = c & 0xF0F0F0F0u;
+        return v | v >> 4;
+    }
     }
 }
 
@@ -410,6 +430,7 @@ static uint32_t g_surf_tick;
 static pthread_mutex_t g_surf_lock = PTHREAD_MUTEX_INITIALIZER;  // vs. the frontend's scanout
 
 static uint64_t hash_bytes(const uint8_t *p, size_t n);
+static int g_band_shift = 3;  // raster band strip height: 8 rows at 1x, 16 at 2-3x, 32 at 4x
 
 void gpu_set_render_scale(int n) { g_scale_req = n < 1 ? 1 : n > 4 ? 4 : n; }
 int gpu_render_scale(void) { return g_scale_req ? g_scale_req : g_scale; }
@@ -574,6 +595,7 @@ void gpu_resolve_all(void) {
         for (int k = 0; k < MAX_SURFS; k++)
             if (g_surfs[k].pix) surf_drop(&g_surfs[k]);
         g_scale = g_scale_req;
+        g_band_shift = g_scale >= 4 ? 5 : g_scale >= 2 ? 4 : 3;  // the queue is drained here
         fprintf(stderr, "render scale %dx\n", g_scale);
     }
     g_scale_req = 0;
@@ -664,6 +686,7 @@ static void target_scale(Target *t, int uses_depth) {
     if (c->addr != t->fb || c->fmt != t->fb_fmt || !c->pix) return;
     int S = g_scale;
     t->scale = S;
+    t->mshift = S == 2 ? 1 : S == 4 ? 2 : -1;
     t->scol = (uint32_t *)c->pix;
     t->sz = z ? (uint16_t *)z->pix : NULL;
     t->cmark = c->mark;
@@ -824,7 +847,7 @@ static uint32_t dxt_color(uint32_t a, int x, int y, int fmt) {
     return col | alpha << 24;
 }
 
-static int wrap(int c, int size, int clamp) {
+static inline __attribute__((always_inline)) int wrap(int c, int size, int clamp) {
     if (clamp) return c < 0 ? 0 : c >= size ? size - 1 : c;
     if (!(size & (size - 1))) return c & (size - 1);
     c %= size;  // replacement textures need not be powers of two
@@ -978,8 +1001,16 @@ static void tex_cache_lookup(TexState *t) {
     tex_use(t, e);
 }
 
+// a + (b - a) * w / 256 on each byte, w in 0..256
+static inline uint32_t lerp8(uint32_t a, uint32_t b, uint32_t w) {
+    uint32_t iw = 256 - w;
+    uint32_t rb = (((a & 0x00FF00FFu) * iw + (b & 0x00FF00FFu) * w + 0x00800080u) >> 8) & 0x00FF00FFu;
+    uint32_t ag = ((a >> 8 & 0x00FF00FFu) * iw + (b >> 8 & 0x00FF00FFu) * w + 0x00800080u) & 0xFF00FF00u;
+    return rb | ag;
+}
+
 // u, v in texels
-static void sample(const TexState *t, float u, float v, float *out) {
+static inline __attribute__((always_inline)) void sample(const TexState *t, float u, float v, float *out) {
     const uint32_t *p = t->pix;
     int w = t->pw, h = t->ph;
     if (w != t->w) u *= t->psx;
@@ -997,12 +1028,12 @@ static void sample(const TexState *t, float u, float v, float *out) {
     float fx = u - (float)x0, fy = v - (float)y0;
     int xa = wrap(x0, w, t->clamp_u), xb = wrap(x0 + 1, w, t->clamp_u);
     int ya = wrap(y0, h, t->clamp_v) * w, yb = wrap(y0 + 1, h, t->clamp_v) * w;
-    uint32_t c[4] = {p[ya + xa], p[ya + xb], p[yb + xa], p[yb + xb]};
-    for (int i = 0; i < 4; i++) {
-        float a = (float)(c[0] >> (8 * i) & 0xFF), b = (float)(c[1] >> (8 * i) & 0xFF);
-        float cc = (float)(c[2] >> (8 * i) & 0xFF), d = (float)(c[3] >> (8 * i) & 0xFF);
-        out[i] = (a * (1 - fx) + b * fx) * (1 - fy) + (cc * (1 - fx) + d * fx) * fy;
-    }
+    // fixed point, two channels per 32-bit lane (weights out of 256)
+    uint32_t wx = (uint32_t)(fx * 256.f), wy = (uint32_t)(fy * 256.f);
+    uint32_t top = lerp8(p[ya + xa], p[ya + xb], wx), bot = lerp8(p[yb + xa], p[yb + xb], wx);
+    uint32_t c = lerp8(top, bot, wy);
+    out[0] = (float)(c & 0xFF); out[1] = (float)(c >> 8 & 0xFF);
+    out[2] = (float)(c >> 16 & 0xFF); out[3] = (float)(c >> 24);
 }
 
 // ---------------------------------------------------------------- per-pixel
@@ -1046,7 +1077,7 @@ static void pix_state(PixState *p, int through) {
     p->write_mask = (R(GE_MASKRGB) & 0xFFFFFF) | (R(GE_MASKALPHA) & 0xFF) << 24;
 }
 
-static int cmp(int func, int a, int b) {
+static inline __attribute__((always_inline)) int cmp(int func, int a, int b) {
     switch (func) {
     case 0: return 0;
     case 1: return 1;
@@ -1057,6 +1088,26 @@ static int cmp(int func, int a, int b) {
     case 6: return a > b;
     default: return a >= b;
     }
+}
+
+// All three channels of a blend factor at once.
+static inline __attribute__((always_inline)) void blend_factors(int f, int is_src, const float *s, const float *d, uint32_t fix, float *o) {
+    const float k = 1.f / 255.f;
+    float v;
+    switch (f) {
+    case 0: for (int i = 0; i < 3; i++) o[i] = (is_src ? d[i] : s[i]) * k; return;
+    case 1: for (int i = 0; i < 3; i++) o[i] = 1.f - (is_src ? d[i] : s[i]) * k; return;
+    case 2: v = s[3] * k; break;
+    case 3: v = 1.f - s[3] * k; break;
+    case 4: v = d[3] * k; break;
+    case 5: v = 1.f - d[3] * k; break;
+    case 6: v = 2.f * s[3] * k; break;
+    case 7: v = 1.f - 2.f * s[3] * k; break;
+    case 8: v = 2.f * d[3] * k; break;
+    case 9: v = 1.f - 2.f * d[3] * k; break;
+    default: for (int i = 0; i < 3; i++) o[i] = (float)(fix >> (8 * i) & 0xFF) * k; return;
+    }
+    o[0] = o[1] = o[2] = v;
 }
 
 static float blend_factor(int f, int is_src, const float *s, const float *d, uint32_t fix, int ch) {
@@ -1079,18 +1130,38 @@ static float blend_factor(int f, int is_src, const float *s, const float *d, uin
 static inline float clamp255(float v) { return v < 0.f ? 0.f : v > 255.f ? 255.f : v; }
 
 // ---------------------------------------------------------------- parallel bands
-// With RASTER_THREADS > 0, primitives are queued and every worker rasterizes
-// all of them, but only on its own rows (8-row bands, interleaved).
-static int g_nbands = 1;
+// With RASTER_THREADS > 0, primitives are queued and drawn by worker threads.
+// The screen is cut into strips of rows, interleaved over NBANDS bands; each
+// band is an in-order stream over the queue that any idle worker can take, so
+// faster cores simply draw more bands (Apple chips mix fast and slow cores).
+#define NBANDS 32
+static int g_nbands = 1;     // 1: no workers, everything drawn inline
+uint64_t g_worker_busy_us[64], g_worker_px[64];  // stats (index: worker / band)
+uint64_t hle_time_us(void);
 static __thread int tl_band;
 // `band` is read from tl_band once per primitive: thread-locals are slow on some platforms
-static inline int owns_row(int y, int band) { return g_nbands == 1 || ((y >> 3) % g_nbands) == band; }
+static inline int owns_row(int y, int band) {
+    return g_nbands == 1 || ((y >> g_band_shift) & (NBANDS - 1)) == band;
+}
+// Does this band own any row in [y0, y1]? Lets workers skip most small primitives before setup.
+static inline int owns_any_row(int y0, int y1, int band) {
+    if (g_nbands == 1) return 1;
+    int b0 = y0 >> g_band_shift, b1 = y1 >> g_band_shift;
+    if (b1 - b0 + 1 >= NBANDS) return 1;
+    for (int b = b0; b <= b1; b++)
+        if ((b & (NBANDS - 1)) == band) return 1;
+    return 0;
+}
 
 // Pixel access: VRAM, or the scaled surfaces when the target has them.
-static inline uint32_t px_read(const Target *t, int x, int y) {
+static inline __attribute__((always_inline)) int mark_index(const Target *t, int x, int y) {
+    if (t->mshift >= 0) return (y >> t->mshift) * (int)t->fb_stride + (x >> t->mshift);
+    return (y / t->scale) * (int)t->fb_stride + x / t->scale;
+}
+static inline __attribute__((always_inline)) uint32_t px_read(const Target *t, int x, int y) {
     return t->scol ? t->scol[y * t->sw + x] : fb_read(t, x, y);
 }
-static inline void px_write(const Target *t, int x, int y, uint32_t c, uint32_t mask) {
+static inline __attribute__((always_inline)) void px_write(const Target *t, int x, int y, uint32_t c, uint32_t mask) {
     if (!t->scol) {
         fb_write(t, x, y, c, mask);
         return;
@@ -1098,22 +1169,22 @@ static inline void px_write(const Target *t, int x, int y, uint32_t c, uint32_t 
     uint32_t *d = &t->scol[y * t->sw + x];
     if (mask) c = (c & ~mask) | (*d & mask);
     // store what VRAM would hold, so blending and readback match 1x
-    if (t->fb_fmt != 3) c = fb_decode16(fb_encode16(c, t->fb_fmt), t->fb_fmt);
+    if (t->fb_fmt != 3) c = fb_quantize(c, t->fb_fmt);
     *d = c;
-    t->cmark[(y / t->scale) * (int)t->fb_stride + x / t->scale] = 1;
+    t->cmark[mark_index(t, x, y)] = 1;
 }
-static inline int z_read(const Target *t, uint32_t za, int x, int y) {
+static inline __attribute__((always_inline)) int z_read(const Target *t, uint32_t za, int x, int y) {
     return t->sz ? t->sz[y * t->sw + x] : mem_r16(za);
 }
-static inline void z_write(const Target *t, uint32_t za, int x, int y, int z) {
+static inline __attribute__((always_inline)) void z_write(const Target *t, uint32_t za, int x, int y, int z) {
     if (t->sz) {
         t->sz[y * t->sw + x] = (uint16_t)z;
-        t->zmark[(y / t->scale) * (int)t->fb_stride + x / t->scale] = 1;
+        t->zmark[mark_index(t, x, y)] = 1;
     } else if (!t->scol) mem_w16(za, (uint16_t)z);
 }
 
 // Shade one pixel. col: interpolated vertex color; uv in texels.
-static void shade(const PixState *p, int x, int y, float z, const float *col, float u, float v) {
+static inline __attribute__((always_inline)) void shade(const PixState *p, int x, int y, float z, const float *col, float u, float v, int z_passed) {
     const Target *t = &p->tg;
     if (x < t->sx1 || x > t->sx2 || y < t->sy1 || y > t->sy2 || x < 0 || y < 0) return;
     if (!t->scol && (x >= 1024 || y >= 1024)) return;
@@ -1130,8 +1201,8 @@ static void shade(const PixState *p, int x, int y, float z, const float *col, fl
     }
 
     // early depth test: skip texturing hidden pixels (alpha test must come first otherwise)
-    int z_done = 0;
-    if (p->z_test && !p->alpha_test) {
+    int z_done = z_passed;
+    if (p->z_test && !p->alpha_test && !z_done) {
         if (!cmp(p->z_func, zi, z_read(t, za, x, y))) return;
         z_done = 1;
     }
@@ -1176,18 +1247,18 @@ static void shade(const PixState *p, int x, int y, float z, const float *col, fl
     if (p->blend) {
         uint32_t dv = px_read(t, x, y);
         float d[4] = {(float)(dv & 0xFF), (float)(dv >> 8 & 0xFF), (float)(dv >> 16 & 0xFF), (float)(dv >> 24)};
-        float out[3];
-        for (int i = 0; i < 3; i++) {
-            float fa = blend_factor(p->bl_src, 1, c, d, p->fix_a, i);
-            float fb = blend_factor(p->bl_dst, 0, c, d, p->fix_b, i);
-            switch (p->bl_eq) {
-            case 0: out[i] = c[i] * fa + d[i] * fb; break;
-            case 1: out[i] = c[i] * fa - d[i] * fb; break;
-            case 2: out[i] = d[i] * fb - c[i] * fa; break;
-            case 3: out[i] = c[i] < d[i] ? c[i] : d[i]; break;
-            case 4: out[i] = c[i] > d[i] ? c[i] : d[i]; break;
-            default: out[i] = fabsf(c[i] - d[i]); break;
-            }
+        float out[3], fa[3], fb[3];
+        if (p->bl_eq < 3) {
+            blend_factors(p->bl_src, 1, c, d, p->fix_a, fa);
+            blend_factors(p->bl_dst, 0, c, d, p->fix_b, fb);
+        }
+        switch (p->bl_eq) {
+        case 0: for (int i = 0; i < 3; i++) out[i] = c[i] * fa[i] + d[i] * fb[i]; break;
+        case 1: for (int i = 0; i < 3; i++) out[i] = c[i] * fa[i] - d[i] * fb[i]; break;
+        case 2: for (int i = 0; i < 3; i++) out[i] = d[i] * fb[i] - c[i] * fa[i]; break;
+        case 3: for (int i = 0; i < 3; i++) out[i] = c[i] < d[i] ? c[i] : d[i]; break;
+        case 4: for (int i = 0; i < 3; i++) out[i] = c[i] > d[i] ? c[i] : d[i]; break;
+        default: for (int i = 0; i < 3; i++) out[i] = fabsf(c[i] - d[i]); break;
         }
         c[0] = out[0]; c[1] = out[1]; c[2] = out[2];
         c[3] = d[3];  // alpha holds stencil; blending never changes it
@@ -1206,14 +1277,15 @@ static inline float edge(const SVtx *a, const SVtx *b, float x, float y) {
 }
 
 static void draw_triangle(const PixState *p, const SVtx *v0, const SVtx *v1, const SVtx *v2, int flat) {
+    const Target *t = &p->tg;
+    float miny = fminf(v0->y, fminf(v1->y, v2->y)), maxy = fmaxf(v0->y, fmaxf(v1->y, v2->y));
+    int y0 = (int)fmaxf(floorf(miny), (float)t->sy1), y1 = (int)fminf(ceilf(maxy), (float)t->sy2);
+    if (y1 < y0 || !owns_any_row(y0, y1, tl_band)) return;
     float area = edge(v0, v1, v2->x, v2->y);
     if (area == 0.f || !isfinite(area)) return;
-    const Target *t = &p->tg;
     float minx = fminf(v0->x, fminf(v1->x, v2->x)), maxx = fmaxf(v0->x, fmaxf(v1->x, v2->x));
-    float miny = fminf(v0->y, fminf(v1->y, v2->y)), maxy = fmaxf(v0->y, fmaxf(v1->y, v2->y));
     int x0 = (int)fmaxf(floorf(minx), (float)t->sx1), x1 = (int)fminf(ceilf(maxx), (float)t->sx2);
-    int y0 = (int)fmaxf(floorf(miny), (float)t->sy1), y1 = (int)fminf(ceilf(maxy), (float)t->sy2);
-    if (x1 < x0 || y1 < y0 || x1 - x0 > 2048 * t->scale || y1 - y0 > 2048 * t->scale) return;
+    if (x1 < x0 || x1 - x0 > 2048 * t->scale || y1 - y0 > 2048 * t->scale) return;
     float inv = 1.f / area;
     // barycentric weights are affine in screen space: w(x,y) = w0 + dx*x + dy*y
     float e0x = -(v2->y - v1->y) * inv, e0y = (v2->x - v1->x) * inv;
@@ -1226,6 +1298,8 @@ static void draw_triangle(const PixState *p, const SVtx *v0, const SVtx *v1, con
     float flat_col[4];
     for (int i = 0; i < 4; i++) flat_col[i] = v2->c[i] / v2->iw;
     int band = tl_band;
+    // the depth test can run before anything else (the alpha test would have to come first)
+    int early_z = p->z_test && !p->alpha_test && !p->clear && (t->scol || (x1 < 1024 && y1 < 1024));
     for (int y = y0; y <= y1; y++, r0 += e0y, r1 += e1y, r2 += e2y) {
         if (!owns_row(y, band)) continue;
         // span of this row where all three weights are >= 0 (w = r + e*(x - x0))
@@ -1240,19 +1314,25 @@ static void draw_triangle(const PixState *p, const SVtx *v0, const SVtx *v1, con
         int xs = x0 + (int)ceilf(lo - 0.001f), xe = x0 + (int)floorf(hi + 0.001f);
         if (xs < x0) xs = x0;
         if (xe > x1) xe = x1;
+        if (xe >= xs) g_worker_px[band] += (uint64_t)(xe - xs + 1);
         float dx = (float)(xs - x0);
         float w0 = r0 + e0x * dx, w1 = r1 + e1x * dx, w2 = r2 + e2x * dx;
         for (int x = xs; x <= xe; x++, w0 += e0x, w1 += e1x, w2 += e2x) {
             if (w0 < 0.f || w1 < 0.f || w2 < 0.f) continue;
-            float k = persp ? 1.f / (w0 * v0->iw + w1 * v1->iw + w2 * v2->iw) : 1.f;
             float z = w0 * v0->z + w1 * v1->z + w2 * v2->z;
+            if (early_z) {  // depth first: hidden pixels skip all the interpolation below
+                int zi = (int)(z < 0.f ? 0.f : z > 65535.f ? 65535.f : z);
+                uint32_t za = t->zb + (uint32_t)(y * (int)t->zb_stride + x) * 2;
+                if (!cmp(p->z_func, zi, z_read(t, za, x, y))) continue;
+            }
+            float k = persp ? 1.f / (w0 * v0->iw + w1 * v1->iw + w2 * v2->iw) : 1.f;
             float col[4];
             if (flat) memcpy(col, flat_col, sizeof col);
             else
                 for (int i = 0; i < 4; i++) col[i] = (w0 * v0->c[i] + w1 * v1->c[i] + w2 * v2->c[i]) * k;
             float u = (w0 * v0->u + w1 * v1->u + w2 * v2->u) * k * tw;
             float v = (w0 * v0->v + w1 * v1->v + w2 * v2->v) * k * th;
-            shade(p, x, y, z, col, u, v);
+            shade(p, x, y, z, col, u, v, early_z);
         }
     }
 }
@@ -1275,7 +1355,7 @@ static void draw_rect(const PixState *p, const SVtx *a, const SVtx *b) {
                 u *= tw;
                 v *= th;
             }
-            shade(p, x, y, b->z, col, u, v);
+            shade(p, x, y, b->z, col, u, v, 0);
         }
     }
 }
@@ -1289,7 +1369,7 @@ static void draw_line(const PixState *p, const SVtx *a, const SVtx *b) {
         int px = (int)(a->x + dx * t), py = (int)(a->y + dy * t);
         for (int j = 0; j < S; j++)  // keep the 1-PSP-pixel thickness
             if (owns_row(py + j, tl_band))
-                for (int k = 0; k < S; k++) shade(p, px + k, py + j, a->z + (b->z - a->z) * t, col, a->u, a->v);
+                for (int k = 0; k < S; k++) shade(p, px + k, py + j, a->z + (b->z - a->z) * t, col, a->u, a->v, 0);
     }
 }
 
@@ -1299,7 +1379,7 @@ static void draw_point(const PixState *p, const SVtx *a) {
     int S = p->tg.scale, x = (int)a->x, y = (int)a->y;
     for (int j = 0; j < S; j++)
         if (owns_row(y + j, tl_band))
-            for (int i = 0; i < S; i++) shade(p, x + i, y + j, a->z, col, a->u, a->v);
+            for (int i = 0; i < S; i++) shade(p, x + i, y + j, a->z, col, a->u, a->v, 0);
 }
 
 // ---------------------------------------------------------------- job queue
@@ -1311,13 +1391,14 @@ typedef struct {
     SVtx v[3];
 } Job;
 
-#define NJOBS 16384
+#define NJOBS 65536
 #define NSTATES 8192
 #define MAX_WORKERS 16
 static Job g_jobs[NJOBS];
 static PixState g_states[NSTATES];
 static int g_state_next;
-static uint64_t g_job_w, g_job_r[MAX_WORKERS];
+static uint64_t g_job_w, g_band_r[NBANDS];  // published end; per band: drawn up to
+static uint8_t g_band_busy[NBANDS];
 static uint64_t g_job_pending, g_job_r_min_cache;  // producer side (GPU thread only)
 static int g_nworkers;
 static pthread_mutex_t g_q_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -1337,15 +1418,26 @@ static void run_job(const Job *j) {
 
 static void *raster_worker(void *arg) {
     int me = (int)(intptr_t)arg;
-    tl_band = me;
     pthread_mutex_lock(&g_q_lock);
     for (;;) {
-        while (g_job_r[me] == g_job_w) pthread_cond_wait(&g_q_work, &g_q_lock);
-        uint64_t end = g_job_w;
+        // take the free band that is furthest behind
+        int b = -1;
+        for (int k = 0; k < NBANDS; k++)
+            if (!g_band_busy[k] && g_band_r[k] < g_job_w && (b < 0 || g_band_r[k] < g_band_r[b])) b = k;
+        if (b < 0) {
+            pthread_cond_wait(&g_q_work, &g_q_lock);
+            continue;
+        }
+        g_band_busy[b] = 1;
+        uint64_t start = g_band_r[b], end = g_job_w;
         pthread_mutex_unlock(&g_q_lock);
-        for (uint64_t i = g_job_r[me]; i < end; i++) run_job(&g_jobs[i % NJOBS]);
+        tl_band = b;
+        uint64_t t0 = hle_time_us();
+        for (uint64_t i = start; i < end; i++) run_job(&g_jobs[i % NJOBS]);
+        g_worker_busy_us[me] += hle_time_us() - t0;
         pthread_mutex_lock(&g_q_lock);
-        g_job_r[me] = end;
+        g_band_r[b] = end;
+        g_band_busy[b] = 0;
         pthread_cond_broadcast(&g_q_done);
     }
     return NULL;
@@ -1353,8 +1445,8 @@ static void *raster_worker(void *arg) {
 
 static uint64_t min_read(void) {
     uint64_t m = g_job_w;
-    for (int k = 0; k < g_nworkers; k++)
-        if (g_job_r[k] < m) m = g_job_r[k];
+    for (int k = 0; k < NBANDS; k++)
+        if (g_band_r[k] < m) m = g_band_r[k];
     return m;
 }
 
@@ -1389,7 +1481,7 @@ static void raster_init(void) {
     if (n > MAX_WORKERS) n = MAX_WORKERS;
     if (n == 1) n = 0;  // one worker buys nothing over drawing inline
     g_nworkers = (int)n;
-    g_nbands = n ? (int)n : 1;
+    g_nbands = n ? NBANDS : 1;
     for (int k = 0; k < g_nworkers; k++) {
         pthread_t t;
         pthread_create(&t, NULL, raster_worker, (void *)(intptr_t)k);

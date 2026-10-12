@@ -195,6 +195,13 @@ int main(int argc, char **argv) {
     load_image("image.bin");  // preloaded into the virtual FS; the ISO comes from the page
     io_init(NULL, "ms0");
 #else
+    // GE_REPLAY=capture.bin [GE_REPLAY_ITERS=n] [GE_REPLAY_OUT=out.ppm]: draw a captured frame offline
+    if (getenv("GE_REPLAY")) {
+        if (getenv("RENDER_SCALE")) gpu_set_render_scale(atoi(getenv("RENDER_SCALE")));
+        gpu_resolve_all();  // applies the scale
+        return gpu_replay(getenv("GE_REPLAY"), getenv("GE_REPLAY_ITERS") ? atoi(getenv("GE_REPLAY_ITERS")) : 20,
+                          getenv("GE_REPLAY_OUT"));
+    }
     if (argc < 3) {
         fprintf(stderr, "usage: %s image.bin game.iso\n", argv[0]);
         return 1;
@@ -253,6 +260,21 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "  flushes: list %u tex %u xfer %u targets %u states %u\n", g_flush_reason[0],
                         g_flush_reason[1], g_flush_reason[2], g_flush_reason[3], g_flush_reason[4]);
                 memset(g_flush_reason, 0, sizeof g_flush_reason);
+                {
+                    extern uint64_t g_worker_busy_us[64], g_worker_px[64];
+                    uint64_t busy = 0, px = 0, mx = 0;
+                    for (int k = 0; k < 64; k++) {
+                        busy += g_worker_busy_us[k];
+                        px += g_worker_px[k];
+                        if (g_worker_busy_us[k] > mx) mx = g_worker_busy_us[k];
+                    }
+                    if (px)
+                        fprintf(stderr, "  workers: busy %llu ms (max %llu), %.2f Mpx, %.1f ns/px\n",
+                                (unsigned long long)busy / 1000, (unsigned long long)mx / 1000, px / 1e6,
+                                busy * 1000.0 / px);
+                    memset(g_worker_busy_us, 0, sizeof g_worker_busy_us);
+                    memset(g_worker_px, 0, sizeof g_worker_px);
+                }
                 last_frames = g_frames_presented;
             }
             if (!watch) continue;

@@ -55,6 +55,8 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
 | `HEADLESS=1` | no window; with `RUN_SECONDS=n` exit after n guest seconds |
 | `TIME_SCALE=x`, `TIME_SCALE_UNTIL=s` | run guest time x times faster (until s seconds) |
 | `INPUT="118:START,118.3:"` | scripted buttons at guest times (also as URL params on the web) |
+| `GE_CAPTURE=secs` | save the first display list started after that guest time (GE state, VRAM, RAM) to `GE_CAPTURE_FILE` (default `ge_capture.bin`) |
+| `GE_REPLAY=file` | no game: draw a capture `GE_REPLAY_ITERS` times (default 20), print ms/frame, save `GE_REPLAY_OUT=out.ppm`; with `RENDER_SCALE`, `RASTER_THREADS` |
 | `RENDER_SCALE=n` | internal resolution 1..4 (overrides the F1 > Video setting) |
 | `TEX_DIR=dir` | texture pack folder (default `textures/ULUS10139`) |
 | `TEX_DUMP=1` | dump every new texture as PNG into `TEX_DIR/new/` (PPSSPP names) |

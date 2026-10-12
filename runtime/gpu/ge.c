@@ -4,6 +4,8 @@
 // on whichever guest thread is current (see hle_run_interrupts).
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "../hle/hle.h"
 #include "gpu.h"
@@ -18,6 +20,7 @@ typedef struct {
     int sp;
     int cbid;
     uint32_t arg;
+    int started;
 } GeList;
 
 #define MAX_LISTS 64
@@ -210,6 +213,119 @@ static GeList *next_list(void) {
 
 uint64_t g_gpu_busy_us;  // time spent executing lists (stats)
 
+// ---------------------------------------------------------------- frame capture
+// GE_CAPTURE=seconds: save the first display list started after that guest time,
+// with the GE state at its start, VRAM at its start and RAM at its end, to
+// GE_CAPTURE_FILE (default ge_capture.bin). gpu_replay() draws it again offline:
+// repeatable benchmarks and before/after image comparisons.
+
+#define CAP_VRAM 0x04000000u
+#define CAP_VRAM_SIZE 0x00200000u
+#define CAP_RAM 0x08000000u
+#define CAP_RAM_SIZE 0x02000000u
+static GeList *g_cap_list;
+static GeState g_cap_ge;
+static uint32_t g_cap_pc;
+static uint8_t *g_cap_vram;
+
+static void capture_begin(GeList *l) {
+    static int done;
+    const char *at = getenv("GE_CAPTURE");
+    if (done || !at || (double)hle_time_us() / 1e6 < atof(at)) return;
+    done = 1;
+    g_cap_list = l;
+    g_cap_ge = g_ge;
+    g_cap_pc = l->pc;
+    g_cap_vram = malloc(CAP_VRAM_SIZE);
+    memcpy(g_cap_vram, host(CAP_VRAM), CAP_VRAM_SIZE);
+}
+
+static void capture_end(GeList *l) {
+    if (l != g_cap_list) return;
+    g_cap_list = NULL;
+    const char *path = getenv("GE_CAPTURE_FILE") ? getenv("GE_CAPTURE_FILE") : "ge_capture.bin";
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    uint32_t hdr[4] = {0x43454754u /* "TGEC" */, 1, g_cap_pc, (uint32_t)sizeof g_cap_ge};
+    fwrite(hdr, sizeof hdr, 1, f);
+    fwrite(&g_cap_ge, sizeof g_cap_ge, 1, f);
+    fwrite(g_cap_vram, CAP_VRAM_SIZE, 1, f);
+    fwrite(host(CAP_RAM), CAP_RAM_SIZE, 1, f);
+    fclose(f);
+    free(g_cap_vram);
+    fprintf(stderr, "GE list at %08x captured to %s\n", g_cap_pc, path);
+}
+
+// Draw a captured list `iters` times (VRAM/RAM restored once, GE state each
+// time) and report the time per frame; optionally save the result as PPM.
+int gpu_replay(const char *path, int iters, const char *out_ppm) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "replay: cannot open %s\n", path);
+        return 1;
+    }
+    uint32_t hdr[4];
+    if (fread(hdr, sizeof hdr, 1, f) != 1 || hdr[0] != 0x43454754u || hdr[3] != sizeof(GeState)) {
+        fprintf(stderr, "replay: not a capture from this build\n");
+        fclose(f);
+        return 1;
+    }
+    GeState ge;
+    size_t ok = fread(&ge, sizeof ge, 1, f);
+    ok += fread(host(CAP_VRAM), CAP_VRAM_SIZE, 1, f);
+    ok += fread(host(CAP_RAM), CAP_RAM_SIZE, 1, f);
+    fclose(f);
+    if (ok != 3) {
+        fprintf(stderr, "replay: truncated capture\n");
+        return 1;
+    }
+    uint64_t best = ~0ull, total = 0;
+    for (int i = 0; i < iters; i++) {
+        g_ge = ge;
+        GeList l = {.used = 1, .queued = 1, .pc = hdr[2]};
+        uint64_t t0 = hle_time_us();
+        run_list(&l);
+        raster_flush();
+        gpu_resolve_all();
+        uint64_t dt = hle_time_us() - t0;
+        total += dt;
+        if (dt < best) best = dt;
+    }
+    fprintf(stderr, "replay: %d frames at %dx, best %.2f ms, mean %.2f ms\n", iters, gpu_render_scale(),
+            best / 1000.0, total / 1000.0 / iters);
+    if (out_ppm) {
+        uint32_t fb = 0x04000000u | (g_ge.cmd[GE_FRAMEBUFPTR] & 0xFFFFF0u);
+        uint32_t stride = g_ge.cmd[GE_FRAMEBUFWIDTH] & 0x7FC, fmt = g_ge.cmd[GE_FRAMEBUFPIXFORMAT] & 3;
+        static uint32_t px[480 * 4 * 272 * 4];
+        int S = gpu_scanout_scaled(fb, stride, fmt, px, 4);
+        if (!S) {  // 1x: straight from VRAM
+            S = 1;
+            for (int y = 0; y < 272; y++)
+                for (int x = 0; x < 480; x++) {
+                    uint32_t a = fb + (uint32_t)(y * (int)stride + x) * (fmt == 3 ? 4u : 2u), v, r, g, b;
+                    if (fmt == 3) { v = mem_r32(a); r = v & 255; g = v >> 8 & 255; b = v >> 16 & 255; }
+                    else {
+                        v = mem_r16(a);
+                        if (fmt == 0) { r = (v & 31) << 3; g = (v >> 5 & 63) << 2; b = (v >> 11 & 31) << 3; }
+                        else if (fmt == 1) { r = (v & 31) << 3; g = (v >> 5 & 31) << 3; b = (v >> 10 & 31) << 3; }
+                        else { r = (v & 15) << 4; g = (v >> 4 & 15) << 4; b = (v >> 8 & 15) << 4; }
+                    }
+                    px[y * 480 + x] = r | g << 8 | b << 16;
+                }
+        }
+        FILE *o = fopen(out_ppm, "wb");
+        if (o) {
+            fprintf(o, "P6\n%d %d\n255\n", 480 * S, 272 * S);
+            for (int i = 0; i < 480 * S * 272 * S; i++) {
+                uint8_t rgb[3] = {(uint8_t)px[i], (uint8_t)(px[i] >> 8), (uint8_t)(px[i] >> 16)};
+                fwrite(rgb, 3, 1, o);
+            }
+            fclose(o);
+        }
+    }
+    return 0;
+}
+
 static void *gpu_thread(void *arg) {
     (void)arg;
     pthread_mutex_lock(&g_lock);
@@ -221,12 +337,17 @@ static void *gpu_thread(void *arg) {
         }
         pthread_mutex_unlock(&g_lock);
         uint64_t t0 = hle_time_us();
+        if (!l->started) {
+            l->started = 1;
+            capture_begin(l);
+        }
         int done = run_list(l);
         extern uint32_t g_flush_reason[5];
         if (done) {  // the list is complete only once its pixels are
             g_flush_reason[0]++;
             raster_flush();
             gpu_resolve_all();  // and VRAM holds what was drawn at the internal resolution
+            capture_end(l);
         }
         g_gpu_busy_us += hle_time_us() - t0;
         pthread_mutex_lock(&g_lock);
