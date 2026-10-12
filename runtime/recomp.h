@@ -93,6 +93,7 @@ static inline int fcmp(float a, float b, int cond) {
 
 // Provided by the runtime.
 void recomp_probe(Ctx *c, uint32_t func);
+void recomp_probe_ret(Ctx *c, uint32_t func);
 void check_saved(Ctx *c, const uint32_t *saved, uint32_t func, uint32_t at);
 void call_indirect(Ctx *c, uint32_t addr);
 void hle_call(Ctx *c, uint32_t import_index);

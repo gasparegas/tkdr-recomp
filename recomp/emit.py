@@ -275,6 +275,8 @@ class FunctionEmitter:
             return f"{{ {R(31)} = {i.addr + 8:#010x}u; {ds} {self.call(i.target, i.addr + 8)} }}"
         if op == "jr":
             if i.rs == 31:
+                if self.start in PROBES:
+                    return f"{{ {ds} recomp_probe_ret(c, {self.start:#010x}u); return; }}"
                 if self.checked:
                     return (f"{{ {ds} check_saved(c, saved_, {self.start:#010x}u, {i.addr:#010x}u); return; }}")
                 return f"{{ {ds} return; }}"

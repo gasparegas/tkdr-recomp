@@ -1,5 +1,8 @@
 // Routes calls to imported stubs to their HLE implementation.
 #include <stdlib.h>
+#ifndef __EMSCRIPTEN__
+#include <execinfo.h>
+#endif
 
 #include "../func_table.h"
 #include "hle.h"
@@ -31,6 +34,18 @@ void hle_call(Ctx *c, uint32_t idx) {
     HleFunc fn = g_resolved[idx];
     HLOG("%s(%08X, %08X, %08X, %08X) ra=%08X\n", e->name, c->r[4], c->r[5], c->r[6], c->r[7],
          c->r[31]);
+#ifndef __EMSCRIPTEN__
+    // HLE_BT=name: print the guest call chain (host frames are f_<address>)
+    static const char *bt_name;
+    static int bt_init;
+    if (!bt_init) { bt_init = 1; bt_name = getenv("HLE_BT"); }
+    if (bt_name && !strcmp(bt_name, e->name)) {
+        void *bt[64];
+        int n = backtrace(bt, 64);
+        fprintf(stderr, "backtrace at %s:\n", e->name);
+        backtrace_symbols_fd(bt, n, 2);
+    }
+#endif
     if (fn) {
         fn(c);
     } else {

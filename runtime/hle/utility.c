@@ -53,6 +53,15 @@ static uint32_t do_load(uint32_t p) {
     size_t n = fread(host(mem_r32(p + 0x74)), 1, cap, f);
     fclose(f);
     mem_w32(p + 0x7C, (uint32_t)n);
+    mem_w32(p + 0x34, 1021);  // "bind": saved on this console (games check it)
+    // the PSP also returns the PARAM.SFO fields (title, detail, ...) on load
+    char sfo[300];
+    snprintf(sfo, sizeof sfo, "%s/SFOPARAM.BIN", dir);
+    FILE *s = fopen(sfo, "rb");
+    if (s) {
+        fread(host(p + 0x80), 1, 0x504, s);
+        fclose(s);
+    }
     if (first_save_name(p) != p + 0x4C) memcpy(host(p + 0x4C), host(first_save_name(p)), 20);
     return 0;
 }
@@ -87,6 +96,7 @@ static uint32_t do_save(uint32_t p) {
     memcpy(file, host(p + 0x64), 13);
     mkdirs(dir);
     write_blob(dir, file, mem_r32(p + 0x74), mem_r32(p + 0x7C));
+    write_blob(dir, "SFOPARAM.BIN", p + 0x80, 0x504);  // stands in for PARAM.SFO
     write_blob(dir, "ICON0.PNG", mem_r32(p + 0x584), mem_r32(p + 0x584 + 8));
     write_blob(dir, "PIC1.PNG", mem_r32(p + 0x5A4), mem_r32(p + 0x5A4 + 8));
     // titles, so a human can tell saves apart
@@ -158,7 +168,7 @@ static uint32_t do_files(uint32_t p) {
     struct dirent *de;
     while (d && (de = readdir(d))) {
         if (de->d_name[0] == '.' || !strcmp(de->d_name, "TITLE.TXT")) continue;
-        int system = !strcmp(de->d_name, "PARAM.SFO") || !strncmp(de->d_name, "ICON", 4) ||
+        int system = !strcmp(de->d_name, "PARAM.SFO") || !strcmp(de->d_name, "SFOPARAM.BIN") || !strncmp(de->d_name, "ICON", 4) ||
                      !strncmp(de->d_name, "PIC", 3) || !strncmp(de->d_name, "SND", 3);
         // the game's own data files are written "secure" (encrypted) on a PSP
         uint32_t *count = system ? &n_system : &n_secure;

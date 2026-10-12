@@ -115,6 +115,10 @@ void recomp_probe(Ctx *c, uint32_t func) {
             c->r[6], c->r[7], c->r[31], c->r[29]);
 }
 
+void recomp_probe_ret(Ctx *c, uint32_t func) {
+    fprintf(stderr, "probe f_%08X returns v0=%08X\n", func, c->r[2]);
+}
+
 // Diagnostic build (RECOMP_CHECK=1): a function returned with a callee-saved
 // register changed. The stack pointer is checked too.
 void check_saved(Ctx *c, const uint32_t *saved, uint32_t func, uint32_t at) {
