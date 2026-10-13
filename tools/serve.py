@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Serve the web build with the COOP/COEP headers wasm threads need.
 
-usage: serve.py DIR [PORT] [--iso PATH] [--eboot PATH]
-  --iso exposes PATH at /game.iso (with Range support), --eboot at /eboot.bin:
-  local testing only (?iso=/game.iso&eboot=/eboot.bin), never put these online.
+usage: serve.py DIR [PORT] [--iso PATH] [--eboot PATH] [--zip PATH]
+  --iso exposes PATH at /game.iso, --eboot at /eboot.bin, --zip at /game.zip (all with
+  Range support): local testing (?iso=/game.iso&eboot=/eboot.bin, or config.json
+  {"pickFiles": false, "gameZip": "/game.zip"}). Never put these online.
 """
 import http.server
 import os
@@ -11,6 +12,7 @@ import sys
 
 ISO = None
 EBOOT = None
+ZIP = None
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -24,20 +26,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
-        if ISO and self.path.split("?")[0] == "/game.iso":
-            return self.send_iso()
-        if EBOOT and self.path.split("?")[0] == "/eboot.bin":
-            data = open(EBOOT, "rb").read()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
+        path = self.path.split("?")[0]
+        for url, file in (("/game.iso", ISO), ("/eboot.bin", EBOOT), ("/game.zip", ZIP)):
+            if file and path == url:
+                return self.send_file(file)
         return super().do_GET()
 
-    def send_iso(self):
-        size = os.path.getsize(ISO)
+    def send_file(self, name):
+        size = os.path.getsize(name)
         start, end = 0, size - 1
         rng = self.headers.get("Range")
         if rng and rng.startswith("bytes="):
@@ -52,9 +48,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(end - start + 1))
         self.send_header("Accept-Ranges", "bytes")
         self.end_headers()
-        with open(ISO, "rb") as f:
+        with open(name, "rb") as f:  # in chunks: these files are large
             f.seek(start)
-            self.wfile.write(f.read(end - start + 1))
+            left = end - start + 1
+            try:
+                while left > 0:
+                    chunk = f.read(min(left, 1 << 20))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the page stopped reading
 
     def log_message(self, *args):
         pass
@@ -69,6 +74,10 @@ if __name__ == "__main__":
     if "--eboot" in args:
         i = args.index("--eboot")
         EBOOT = os.path.abspath(args[i + 1])
+        del args[i:i + 2]
+    if "--zip" in args:
+        i = args.index("--zip")
+        ZIP = os.path.abspath(args[i + 1])
         del args[i:i + 2]
     directory = args[0] if args else "."
     port = int(args[1]) if len(args) > 1 else 8080

@@ -59,6 +59,36 @@ export async function openDisc(blob) {
     };
 }
 
+// ---------------------------------------------------------------- files on a web server
+
+// A File-like view of a file on an HTTP server that answers Range requests
+// (any NAS or web server does): name, size, slice(a, b).arrayBuffer()/stream(), stream().
+// Only the bytes that are read are downloaded.
+export async function httpFile(url) {
+    const probe = await fetch(url, { headers: { Range: "bytes=0-0" } });
+    if (!probe.ok) throw new Error(`${url}: HTTP ${probe.status}`);
+    const cr = probe.headers.get("Content-Range");
+    const size = cr ? Number(cr.split("/")[1]) : Number(probe.headers.get("Content-Length"));
+    if (probe.status !== 206) throw new Error(`${url}: the server does not answer range requests`);
+    probe.body?.cancel();
+    const name = decodeURIComponent(new URL(url, location.href).pathname.split("/").pop()) || "game.zip";
+    const range = (a, b) => fetch(url, { headers: { Range: `bytes=${a}-${b - 1}` } }).then((r) => {
+        if (r.status !== 206) throw new Error(`${url}: HTTP ${r.status} for a range request`);
+        return r;
+    });
+    const part = (a, b) => ({
+        size: Math.max(0, b - a),
+        arrayBuffer: () => (b > a ? range(a, b).then((r) => r.arrayBuffer()) : Promise.resolve(new ArrayBuffer(0))),
+        stream: () => {
+            const t = new TransformStream();
+            if (b > a) range(a, b).then((r) => r.body.pipeTo(t.writable)).catch((e) => t.writable.abort(e));
+            else t.writable.close();
+            return t.readable;
+        },
+    });
+    return { name, size, slice: (a = 0, b = size) => part(a, Math.min(b, size)), stream: () => part(0, size).stream() };
+}
+
 // ---------------------------------------------------------------- zip archives
 
 // Entries of a .zip (zip64 included): {name, method, csize, usize, local}

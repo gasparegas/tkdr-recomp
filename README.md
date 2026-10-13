@@ -65,6 +65,25 @@ in that browser's storage. Files never leave the device.
 
 Never host `build/web/` or `build/native/`: those contain the translated game.
 
+### Your own server at home
+
+`config.json`, next to the page, decides where the game comes from:
+
+```json
+{ "pickFiles": true,  "gameZip": "" }
+{ "pickFiles": false, "gameZip": "http://my-nas.local/games/tekken.zip" }
+```
+
+With `pickFiles: false` the page loads the zip (your ISO or CSO plus your EBOOT)
+from that address instead of asking for files, keeps it in the browser and
+plays. The server only has to answer HTTP range requests (any NAS or web
+server does); serving the page from the same server avoids CORS setup.
+
+**Use this only on a private network or behind a login, with your own copy.**
+A page that anyone can open and that hands out the game is distributing it.
+The public build always ships with `pickFiles: true` and no address, and a
+build never overwrites an existing `config.json`.
+
 ## Run
 
 Native:

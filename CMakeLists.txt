@@ -90,7 +90,11 @@ if(EMSCRIPTEN)
     # page helpers (disc reading, zip, compressed storage) and hosting headers, copied on every build
     add_custom_target(web_files ALL
         COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/web/disc.mjs ${CMAKE_BINARY_DIR}/disc.mjs
-        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/web/_headers ${CMAKE_BINARY_DIR}/_headers)
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/web/_headers ${CMAKE_BINARY_DIR}/_headers
+        # config.json is the deployer's: written once, never overwritten
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/web/config.json ${CMAKE_BINARY_DIR}/config.default.json
+        COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR}/web/config.json -DDST=${CMAKE_BINARY_DIR}/config.json
+                -P ${CMAKE_SOURCE_DIR}/web/copy_once.cmake)
     set_target_properties(tkdr PROPERTIES SUFFIX ".html"  # relink when the page or the JS glue changes
                           LINK_DEPENDS "${CMAKE_BINARY_DIR}/shell.html;${CMAKE_SOURCE_DIR}/runtime/web/game_lib.js")
     target_link_libraries(tkdr PRIVATE m)
