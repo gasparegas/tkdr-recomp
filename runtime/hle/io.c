@@ -32,7 +32,10 @@ typedef struct {
 int web_iso_read(uint64_t off, void *buf, size_t n);
 static int iso_read(uint64_t off, void *buf, size_t n) { return web_iso_read(off, buf, n); }
 #else
+uint64_t g_iso_read_bytes, g_iso_read_calls;  // stats (FPS=1)
 static int iso_read(uint64_t off, void *buf, size_t n) {
+    g_iso_read_bytes += n;
+    g_iso_read_calls++;
     if (fseeko(g_iso, (off_t)off, SEEK_SET)) return -1;
     return fread(buf, 1, n, g_iso) == n ? 0 : -1;
 }

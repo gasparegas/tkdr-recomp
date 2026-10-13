@@ -339,6 +339,14 @@ int main(int argc, char **argv) {
                         g_flush_reason[1], g_flush_reason[2], g_flush_reason[3], g_flush_reason[4]);
                 memset(g_flush_reason, 0, sizeof g_flush_reason);
                 {
+                    extern uint64_t g_iso_read_bytes, g_iso_read_calls;
+                    static uint64_t lb, lc;
+                    fprintf(stderr, "  disc: %llu reads, %llu KB\n", (unsigned long long)(g_iso_read_calls - lc),
+                            (unsigned long long)(g_iso_read_bytes - lb) / 1024);
+                    lb = g_iso_read_bytes;
+                    lc = g_iso_read_calls;
+                }
+                {
                     extern uint64_t g_worker_busy_us[64], g_worker_px[64];
                     uint64_t busy = 0, px = 0, mx = 0;
                     for (int k = 0; k < 64; k++) {
