@@ -51,6 +51,16 @@ void ui_set_open(int open) {
 
 // Returns 1 when the event belongs to the overlay.
 int ui_event(SDL_Event *e) {
+#ifndef __EMSCRIPTEN__  // (the page handles it in the browser)
+    // full screen: F, F11 or Alt+Enter
+    if (e->type == SDL_KEYDOWN && !e->key.repeat && !g_open &&
+        (e->key.keysym.sym == SDLK_f || e->key.keysym.sym == SDLK_F11 ||
+         (e->key.keysym.sym == SDLK_RETURN && (e->key.keysym.mod & KMOD_ALT)))) {
+        bool fs = SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+        SDL_SetWindowFullscreen(g_win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+        return 1;
+    }
+#endif
     if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_F2 && !e->key.repeat) {
         g_show_fps = !g_show_fps;
         return 1;

@@ -17,6 +17,10 @@
   body.dynamic .dyn { display: block; }
   kbd { background: #222; border: 1px solid #444; border-radius: 4px; padding: 0 5px; }
   /* touch devices: the game takes the whole screen, on-screen controls are drawn in the canvas */
+  #resume { display: none; padding: 20px 24px; border: 1px solid #444; border-radius: 8px; text-align: center; max-width: 520px; }
+  #resume button { font: 600 18px system-ui, sans-serif; padding: 10px 28px; border-radius: 8px; border: 0;
+                   background: #e8e8ea; color: #111; cursor: pointer; }
+  #resume a { color: #9a9a9a; font-size: 13px; }
   body.play { padding: 0; overflow: hidden; overscroll-behavior: none; }
   body.play canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; aspect-ratio: auto;
                      touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
@@ -24,10 +28,15 @@
   #fs { display: none; position: fixed; bottom: max(8px, env(safe-area-inset-bottom)); right: max(8px, env(safe-area-inset-right));
         z-index: 2; width: 36px; height: 36px; border-radius: 18px; border: 1px solid #fff5; background: #0006; color: #fffc;
         font-size: 18px; line-height: 1; }
-  body.play #fs { display: block; }
+  body.started #fs { display: block; }  /* also F key or double click on the game */
 </style>
 </head>
 <body>
+<div id="resume">
+  <p id="resume-what"></p>
+  <button id="play">▶ Play</button>
+  <p><a href="#" id="forget">Forget the saved game files</a></p>
+</div>
 <div id="pick">
   <p>Select your own dump of the game (ULUS-10139). Files are read on this device and never uploaded.</p>
   <label for="iso">Game disc image (.iso)</label>
@@ -39,11 +48,12 @@
       then start the game once; the file appears in PSP/SYSTEM/DUMP. It is translated into code for your browser
       right here, once, and kept in this browser.</small></p>
   </div>
+  <p><small>Both files are then kept in this browser's own storage, on this device: next time you just press Play.</small></p>
 </div>
 <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
 <div id="status">waiting for the ISO…</div>
 <button id="fs" aria-label="Full screen">⛶</button>
-<div id="help">Arrows: move · <kbd>Enter</kbd> Start · <kbd>Space</kbd> Select · <kbd>Z</kbd> <kbd>X</kbd> <kbd>C</kbd> <kbd>S</kbd> □ ✕ ○ △ · <kbd>Q</kbd> <kbd>W</kbd> L/R · <kbd>F1</kbd> settings · <kbd>F2</kbd> fps</div>
+<div id="help">Arrows: move · <kbd>Enter</kbd> Start · <kbd>Space</kbd> Select · <kbd>Z</kbd> <kbd>X</kbd> <kbd>C</kbd> <kbd>S</kbd> □ ✕ ○ △ · <kbd>Q</kbd> <kbd>W</kbd> L/R · <kbd>F1</kbd> settings · <kbd>F2</kbd> fps · <kbd>F</kbd> full screen</div>
 <script>
   var statusEl = document.getElementById('status');
   var Module = {
@@ -64,22 +74,52 @@
   function fitCanvas() {
     if (Module._web_resize) Module._web_resize(innerWidth, innerHeight);
   }
+  function fillScreen(on) {  // the canvas covers the whole page (always on phones)
+    document.body.classList.toggle('play', on);
+    if (on) fitCanvas();
+    else if (Module._web_resize) {  // back to the page layout
+      var c = Module.canvas;
+      requestAnimationFrame(function () { Module._web_resize(c.clientWidth, c.clientHeight); });
+    }
+  }
   function startPlay() {
+    document.body.classList.add('started');
+    addEventListener('resize', function () { if (document.body.classList.contains('play')) fitCanvas(); });
+    if (window.visualViewport) visualViewport.addEventListener('resize', function () {
+      if (document.body.classList.contains('play')) fitCanvas();
+    });
     if (!touchDevice) return;
-    document.body.classList.add('play');
     ENV.TOUCH = '1';
-    addEventListener('resize', fitCanvas);
-    if (window.visualViewport) visualViewport.addEventListener('resize', fitCanvas);
+    fillScreen(true);
     // the window exists once main() has run a frame
     var tries = 0, t = setInterval(function () { fitCanvas(); if (++tries > 20) clearInterval(t); }, 250);
   }
-  document.getElementById('fs').addEventListener('click', function () {
+  function fullscreen() {
+    return document.fullscreenElement || document.webkitFullscreenElement;
+  }
+  function toggleFullscreen() {
+    if (fullscreen()) {
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      return;
+    }
     var el = document.documentElement;
     var p = el.requestFullscreen ? el.requestFullscreen() : (el.webkitRequestFullscreen && el.webkitRequestFullscreen());
     Promise.resolve(p).then(function () {
       if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(function () {});
     }).catch(function () {});
-  });
+  }
+  function onFullscreenChange() {
+    if (!touchDevice) fillScreen(!!fullscreen());
+    else fitCanvas();
+  }
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+  document.getElementById('fs').addEventListener('click', toggleFullscreen);
+  Module.canvas.addEventListener('dblclick', toggleFullscreen);
+  addEventListener('keydown', function (e) {  // F: full screen (the game does not use it)
+    if ((e.key === 'f' || e.key === 'F') && !e.repeat && document.body.classList.contains('started') &&
+        !e.ctrlKey && !e.metaKey && !e.altKey) toggleFullscreen();
+  }, true);
   // Start once everything is there: the runtime, the ISO and, in the hostable
   // build, the game's code recompiled from the player's EBOOT.
   var DYNAMIC = @TKDR_DYNAMIC@;  // set by CMake (RECOMP_DYNAMIC)
@@ -124,7 +164,71 @@
     Module.isoFile = file;
     statusEl.textContent = file.name + ' (' + (file.size / 1048576).toFixed(0) + ' MB)';
     ready.iso = true;
+    pickedIso = file;
+    rememberFiles();
     tryStart();
+  });
+
+  // ---- Keep the player's files in this browser (Origin Private File System for
+  // the ISO, IndexedDB for the EBOOT), so next time "Play" is enough.
+  var pickedIso = null, pickedEboot = null, rememberStarted = false;
+  var canRemember = !!(navigator.storage && navigator.storage.getDirectory && window.FileSystemFileHandle &&
+                       FileSystemFileHandle.prototype.createWritable);
+  async function rememberFiles() {
+    if (!canRemember || rememberStarted || !pickedIso || (DYNAMIC && !pickedEboot)) return;
+    rememberStarted = true;
+    try {
+      if (navigator.storage.persist) navigator.storage.persist();
+      await idb('readwrite', function (st) { return st.delete('iso-meta'); });
+      if (DYNAMIC) await idb('readwrite', function (st) { return st.put(pickedEboot, 'eboot'); });
+      var root = await navigator.storage.getDirectory();
+      var fh = await root.getFileHandle('game.iso', { create: true });
+      statusEl.textContent = 'keeping the game files in this browser (next time: just Play)…';
+      var w = await fh.createWritable();
+      await pickedIso.stream().pipeTo(w);  // closes the file when done
+      await idb('readwrite', function (st) {
+        return st.put({ name: pickedIso.name, size: pickedIso.size, when: Date.now() }, 'iso-meta');
+      });
+      console.log('game files kept in this browser');
+      statusEl.textContent = 'Game files kept in this browser: next time just press Play.';
+    } catch (err) {
+      console.warn('could not keep the game files in this browser: ' + err);
+    }
+  }
+  async function savedFiles() {
+    if (!canRemember || params.get('iso')) return null;
+    try {
+      var meta = await idb('readonly', function (st) { return st.get('iso-meta'); });
+      var eboot = DYNAMIC ? await idb('readonly', function (st) { return st.get('eboot'); }) : null;
+      if (!meta || (DYNAMIC && !eboot)) return null;
+      var root = await navigator.storage.getDirectory();
+      var file = await (await root.getFileHandle('game.iso')).getFile();
+      if (file.size !== meta.size) return null;  // copy interrupted
+      return { meta: meta, file: file, eboot: eboot };
+    } catch (err) { return null; }
+  }
+  savedFiles().then(function (saved) {
+    if (!saved) return;
+    document.getElementById('pick').style.display = 'none';
+    var r = document.getElementById('resume');
+    r.style.display = 'block';
+    document.getElementById('resume-what').textContent = 'Your files are kept in this browser: ' + saved.meta.name +
+      ' (' + (saved.meta.size / 1048576).toFixed(0) + ' MB).';
+    statusEl.textContent = '';
+    document.getElementById('play').addEventListener('click', function () {
+      r.style.display = 'none';
+      Module.isoFile = saved.file;
+      ready.iso = true;
+      if (DYNAMIC) prepareGame(new Uint8Array(saved.eboot), true);
+      else tryStart();
+    });
+    document.getElementById('forget').addEventListener('click', async function (e) {
+      e.preventDefault();
+      var root = await navigator.storage.getDirectory();
+      await root.removeEntry('game.iso').catch(function () {});
+      await idb('readwrite', function (st) { return st.clear(); });
+      location.reload();
+    });
   });
 
   // EBOOT -> game code (hostable build), cached in IndexedDB by hash
@@ -140,7 +244,11 @@
       };
     });
   }
-  async function prepareGame(bytes) {
+  async function prepareGame(bytes, fromSaved) {
+    if (!fromSaved) {
+      pickedEboot = bytes.slice();  // kept for next time (the original goes to the worker)
+      rememberFiles();
+    }
     var rc = await import('./recomp/index.mjs');
     statusEl.textContent = 'checking the executable…';
     var hash = await rc.sha1(bytes);
@@ -166,6 +274,11 @@
         w.postMessage({ eboot: bytes.buffer }, [bytes.buffer]);
       });
       await idb('readwrite', function (st) { return st.put(game, key); }).catch(function () {});
+      // translations made by older recompiler versions are no longer needed
+      var keys = await idb('readonly', function (st) { return st.getAllKeys(); }).catch(function () { return []; });
+      for (var i = 0; i < keys.length; i++)
+        if (typeof keys[i] === 'string' && keys[i].indexOf(hash + '-') === 0 && keys[i] !== key)
+          await idb('readwrite', function (st) { return st.delete(keys[i]); }).catch(function () {});
     }
     statusEl.textContent = 'game code ready (' + (game.code.length / 1048576).toFixed(1) + ' MB)';
     ready.game = true;
