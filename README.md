@@ -74,6 +74,10 @@ Never host `build/web/` or `build/native/`: those contain the translated game.
 { "pickFiles": false, "gameZip": "http://my-nas.local/games/tekken.zip" }
 ```
 
+On a host, write it from environment variables at deploy time:
+`python3 tools/web_config.py build/web-host` (`PICK_FILES`, default `true`;
+`GAME_ZIP` for `false`). On a public host leave `PICK_FILES` unset or `true`.
+
 With `pickFiles: false` the page loads the zip (your ISO or CSO plus your EBOOT)
 from that address instead of asking for files, keeps it in the browser and
 plays. The server only has to answer HTTP range requests (any NAS or web
