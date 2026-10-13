@@ -1,4 +1,4 @@
-// Browser glue: ISO reads from a File held by the main thread.
+// Browser glue: disc reads go through the page (Module.discRead), on the main thread.
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <emscripten/threading.h>
@@ -17,12 +17,15 @@ static void request_read(double off, void *ptr, int len, int *flag) {
             var ptr = $1;
             var len = $2;
             var flag = $3;
+            // Module.discRead: the page's reader (plain ISO or compressed CSO, see web/disc.mjs)
             var src = Module.isoUrl
                 ? fetch(Module.isoUrl, {headers: {Range: 'bytes=' + off + '-' + (off + len - 1)}})
                       .then(function(r) { return r.arrayBuffer(); })
-                : Module.isoFile.slice(off, off + len).arrayBuffer();
+                : Module.discRead(off, len);
             src.then(function(b) {
-                HEAPU8.set(new Uint8Array(b), ptr);
+                var bytes = new Uint8Array(b instanceof Uint8Array ? b.buffer : b,
+                                           b instanceof Uint8Array ? b.byteOffset : 0);
+                HEAPU8.set(bytes.subarray(0, Math.min(bytes.length, len)), ptr);
                 Atomics.store(HEAP32, flag >> 2, 1);
                 Atomics.notify(HEAP32, flag >> 2);
             });

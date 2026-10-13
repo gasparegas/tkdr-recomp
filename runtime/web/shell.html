@@ -15,6 +15,7 @@
   #pick small { color: #9a9a9a; }
   .dyn { display: none; }
   body.dynamic .dyn { display: block; }
+  body.dragging #pick { border-color: #e8e8ea; background: #ffffff0d; }
   kbd { background: #222; border: 1px solid #444; border-radius: 4px; padding: 0 5px; }
   /* touch devices: the game takes the whole screen, on-screen controls are drawn in the canvas */
   #resume { display: none; padding: 20px 24px; border: 1px solid #444; border-radius: 8px; text-align: center; max-width: 520px; }
@@ -69,22 +70,22 @@
   <p><a href="#" id="forget">Forget the saved game files</a></p>
 </div>
 <div id="pick">
-  <p>Select your own dump of the game (ULUS-10139). Files are read on this device and never uploaded.</p>
-  <label for="iso">Game disc image (.iso)</label>
-  <input type="file" id="iso" accept=".iso">
+  <p>Bring your own dump of the game (ULUS-10139). Files are read on this device and never uploaded.</p>
+  <label for="files">Your game: a <b>.zip</b> with the disc image and the EBOOT, or the files themselves</label>
+  <input type="file" id="files" multiple accept=".zip,.iso,.cso,.bin,.elf,.prx">
+  <p><small>…or drop them anywhere on this page. The disc image can be an ISO or a CSO.</small></p>
   <div class="dyn">
-    <label for="eboot">Decrypted executable (ULUS10139_EBOOT.BIN)</label>
-    <input type="file" id="eboot">
-    <p><small>Made by PPSSPP from your disc: Settings → Tools → Developer tools → “Dump decrypted EBOOT.BIN on game boot”,
-      then start the game once; the file appears in PSP/SYSTEM/DUMP. It is translated into code for your browser
-      right here, once, and kept in this browser.</small></p>
+    <p><small>The EBOOT is the decrypted executable, made by PPSSPP from your disc: Settings → Tools → Developer tools →
+      “Dump decrypted EBOOT.BIN on game boot”, then start the game once; it appears in PSP/SYSTEM/DUMP. It is translated
+      into code for your browser right here, once.</small></p>
   </div>
-  <p><small>Both files are then kept in this browser's own storage, on this device: next time you just press Play.</small></p>
+  <p><small>Everything is then kept in this browser's own storage, compressed, on this device: next time you just
+    press Play.</small></p>
 </div>
  <p id="fanline">Unofficial fan project, not made, endorsed or supported by Bandai Namco or Sony. No game content is
   hosted here: you bring your own dump, translated on your device. Tekken is a trademark of Bandai Namco Entertainment Inc.</p>
 <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
-<div id="status">waiting for the ISO…</div>
+<div id="status">waiting for your game files…</div>
 <button id="fs" aria-label="Full screen">⛶</button>
 <div id="help">Arrows: move · <kbd>Enter</kbd> Start · <kbd>Space</kbd> Select · <kbd>Z</kbd> <kbd>X</kbd> <kbd>C</kbd> <kbd>S</kbd> □ ✕ ○ △ · <kbd>Q</kbd> <kbd>W</kbd> L/R · <kbd>F1</kbd> settings · <kbd>F2</kbd> fps · <kbd>F</kbd> full screen</div>
 <script>
@@ -195,85 +196,21 @@
     Module.callMain([]);
   }
 
-  // ISO: picked, or ?iso=URL read over HTTP range requests (local testing)
+  // ---- The disc: read by the runtime through Module.discRead(off, len) (web.c)
+  var discLib = null;
+  function lib() { return discLib || (discLib = import('./disc.mjs')); }
+  function useDisc(disc) {
+    Module.discRead = disc.read;
+    ready.iso = true;
+    tryStart();
+  }
+  // ?iso=URL: read the ISO over HTTP range requests (local testing, tools/serve.py --iso)
   if (params.get('iso')) {
     Module.isoUrl = params.get('iso');
     ready.iso = true;
   }
-  document.getElementById('iso').addEventListener('change', function (e) {
-    var file = e.target.files[0];
-    if (!file) return;
-    Module.isoFile = file;
-    statusEl.textContent = file.name + ' (' + (file.size / 1048576).toFixed(0) + ' MB)';
-    ready.iso = true;
-    pickedIso = file;
-    rememberFiles();
-    tryStart();
-  });
 
-  // ---- Keep the player's files in this browser (Origin Private File System for
-  // the ISO, IndexedDB for the EBOOT), so next time "Play" is enough.
-  var pickedIso = null, pickedEboot = null, rememberStarted = false;
-  var canRemember = !!(navigator.storage && navigator.storage.getDirectory && window.FileSystemFileHandle &&
-                       FileSystemFileHandle.prototype.createWritable);
-  async function rememberFiles() {
-    if (!canRemember || rememberStarted || !pickedIso || (DYNAMIC && !pickedEboot)) return;
-    rememberStarted = true;
-    try {
-      if (navigator.storage.persist) navigator.storage.persist();
-      await idb('readwrite', function (st) { return st.delete('iso-meta'); });
-      if (DYNAMIC) await idb('readwrite', function (st) { return st.put(pickedEboot, 'eboot'); });
-      var root = await navigator.storage.getDirectory();
-      var fh = await root.getFileHandle('game.iso', { create: true });
-      statusEl.textContent = 'keeping the game files in this browser (next time: just Play)…';
-      var w = await fh.createWritable();
-      await pickedIso.stream().pipeTo(w);  // closes the file when done
-      await idb('readwrite', function (st) {
-        return st.put({ name: pickedIso.name, size: pickedIso.size, when: Date.now() }, 'iso-meta');
-      });
-      console.log('game files kept in this browser');
-      statusEl.textContent = 'Game files kept in this browser: next time just press Play.';
-    } catch (err) {
-      console.warn('could not keep the game files in this browser: ' + err);
-    }
-  }
-  async function savedFiles() {
-    if (!canRemember || params.get('iso')) return null;
-    try {
-      var meta = await idb('readonly', function (st) { return st.get('iso-meta'); });
-      var eboot = DYNAMIC ? await idb('readonly', function (st) { return st.get('eboot'); }) : null;
-      if (!meta || (DYNAMIC && !eboot)) return null;
-      var root = await navigator.storage.getDirectory();
-      var file = await (await root.getFileHandle('game.iso')).getFile();
-      if (file.size !== meta.size) return null;  // copy interrupted
-      return { meta: meta, file: file, eboot: eboot };
-    } catch (err) { return null; }
-  }
-  savedFiles().then(function (saved) {
-    if (!saved) return;
-    document.getElementById('pick').style.display = 'none';
-    var r = document.getElementById('resume');
-    r.style.display = 'block';
-    document.getElementById('resume-what').textContent = 'Your files are kept in this browser: ' + saved.meta.name +
-      ' (' + (saved.meta.size / 1048576).toFixed(0) + ' MB).';
-    statusEl.textContent = '';
-    document.getElementById('play').addEventListener('click', function () {
-      r.style.display = 'none';
-      Module.isoFile = saved.file;
-      ready.iso = true;
-      if (DYNAMIC) prepareGame(new Uint8Array(saved.eboot), true);
-      else tryStart();
-    });
-    document.getElementById('forget').addEventListener('click', async function (e) {
-      e.preventDefault();
-      var root = await navigator.storage.getDirectory();
-      await root.removeEntry('game.iso').catch(function () {});
-      await idb('readwrite', function (st) { return st.clear(); });
-      location.reload();
-    });
-  });
-
-  // EBOOT -> game code (hostable build), cached in IndexedDB by hash
+  // ---- Storage in this browser: the disc as a compressed CSO in OPFS, the EBOOT in IndexedDB
   function idb(mode, fn) {
     return new Promise(function (res, rej) {
       var open = indexedDB.open('tkdr-recomp', 1);
@@ -286,13 +223,122 @@
       };
     });
   }
-  async function prepareGame(bytes, fromSaved) {
-    if (!fromSaved) {
-      pickedEboot = bytes.slice();  // kept for next time (the original goes to the worker)
-      rememberFiles();
+  var canKeep = !!(navigator.storage && navigator.storage.getDirectory && window.FileSystemFileHandle &&
+                   FileSystemFileHandle.prototype.createWritable && window.CompressionStream);
+  var DISC_FILE = 'game.cso';
+  function mb(n) { return (n / 1048576).toFixed(0) + ' MB'; }
+  async function keptFile() {
+    var root = await navigator.storage.getDirectory();
+    return (await root.getFileHandle(DISC_FILE)).getFile();
+  }
+  // compress `stream` (total bytes) into OPFS; returns the stored File
+  async function keepDisc(stream, total, label, name) {
+    if (navigator.storage.persist) navigator.storage.persist();
+    await idb('readwrite', function (st) { return st.delete('disc-meta'); });
+    var m = await lib();
+    await m.storeDisc(stream, total, DISC_FILE, function (f) {
+      window.tkKeepProgress = f;
+      if (!started) statusEl.textContent = label + ' ' + Math.round(f * 100) + '%…';
+    });
+    var file = await keptFile();
+    await idb('readwrite', function (st) {
+      return st.put({ name: name, size: file.size, original: total, when: Date.now() }, 'disc-meta');
+    });
+    try {  // the uncompressed copy of earlier versions
+      await (await navigator.storage.getDirectory()).removeEntry('game.iso');
+    } catch (e) {}
+    return file;
+  }
+  async function savedFiles() {
+    if (!canKeep || params.get('iso')) return null;
+    try {
+      var meta = await idb('readonly', function (st) { return st.get('disc-meta'); });
+      var eboot = DYNAMIC ? await idb('readonly', function (st) { return st.get('eboot'); }) : null;
+      if (!meta || (DYNAMIC && !eboot)) return null;
+      var file = await keptFile();
+      if (file.size !== meta.size) return null;  // copy interrupted
+      return { meta: meta, file: file, eboot: eboot };
+    } catch (err) { return null; }
+  }
+  savedFiles().then(function (saved) {
+    if (!saved) return;
+    document.getElementById('pick').style.display = 'none';
+    var r = document.getElementById('resume');
+    r.style.display = 'block';
+    document.getElementById('resume-what').textContent = 'Your game is kept in this browser: ' + saved.meta.name +
+      ' (' + mb(saved.meta.size) + ' compressed from ' + mb(saved.meta.original) + ').';
+    statusEl.textContent = '';
+    document.getElementById('play').addEventListener('click', async function () {
+      r.style.display = 'none';
+      if (DYNAMIC) prepareGame(new Uint8Array(saved.eboot), true);
+      useDisc(await (await lib()).openDisc(saved.file));
+    });
+    document.getElementById('forget').addEventListener('click', async function (e) {
+      e.preventDefault();
+      var root = await navigator.storage.getDirectory();
+      await root.removeEntry(DISC_FILE).catch(function () {});
+      await root.removeEntry('game.iso').catch(function () {});
+      await idb('readwrite', function (st) { return st.clear(); });
+      location.reload();
+    });
+  });
+
+  // ---- Picked or dropped files: a zip, a disc image (ISO/CSO), the EBOOT, in any mix
+  async function handleFiles(list) {
+    var files = Array.prototype.slice.call(list);
+    if (!files.length || started) return;
+    try {
+      statusEl.textContent = 'looking at your files…';
+      var m = await lib(), sorted = await m.sortFiles(files);
+      if (!sorted.disc) throw new Error('no disc image (ISO or CSO) found in what you picked');
+      var eboot = null;
+      if (DYNAMIC) {
+        var rc = await import('./recomp/index.mjs');
+        for (var i = 0; i < sorted.ebootCandidates.length && !eboot; i++) {
+          var bytes = await sorted.ebootCandidates[i]();
+          if ((await rc.sha1(bytes)) === rc.EBOOT_SHA1) eboot = bytes;
+        }
+        if (!eboot) throw new Error('the decrypted EBOOT of ULUS-10139 v1.00 is missing (see below how to make it)');
+        if (canKeep) idb('readwrite', function (st) { return st.put(eboot.slice(), 'eboot'); }).catch(function () {});
+      }
+      document.getElementById('pick').style.display = 'none';
+      if (DYNAMIC) prepareGame(eboot, true);
+      var d = sorted.disc;
+      if (d.blob) {  // a disc image: play it now, keep a compressed copy meanwhile
+        useDisc(await m.openDisc(d.blob));
+        if (canKeep)
+          keepDisc(d.blob.stream(), d.blob.size, 'keeping the game in this browser', d.blob.name).then(function () {
+            statusEl.textContent = 'Game kept in this browser: next time just press Play.';
+          }, function (e) { console.warn('could not keep the game files: ' + e); });
+        return;
+      }
+      // a zip: the disc inside has to be unpacked before it can be read at random places
+      if (!canKeep) throw new Error('this browser cannot unpack the zip here: pick the ISO or CSO itself');
+      var file = await keepDisc(await m.entryStream(d.zip, d.entry), d.entry.usize, 'unpacking and compressing the game',
+                                d.entry.name.split('/').pop());
+      useDisc(await m.openDisc(file));
+    } catch (err) {
+      document.getElementById('pick').style.display = '';
+      statusEl.textContent = String(err.message || err);
     }
+  }
+  document.getElementById('files').addEventListener('change', function (e) { handleFiles(e.target.files); });
+  addEventListener('dragover', function (e) {
+    if (started) return;
+    e.preventDefault();
+    document.body.classList.add('dragging');
+  });
+  addEventListener('dragleave', function () { document.body.classList.remove('dragging'); });
+  addEventListener('drop', function (e) {
+    if (started) return;
+    e.preventDefault();
+    document.body.classList.remove('dragging');
+    handleFiles(e.dataTransfer.files);
+  });
+
+  // ---- EBOOT -> game code (hostable build), cached in IndexedDB by hash
+  async function prepareGame(bytes) {
     var rc = await import('./recomp/index.mjs');
-    statusEl.textContent = 'checking the executable…';
     var hash = await rc.sha1(bytes);
     if (hash !== rc.EBOOT_SHA1) {
       statusEl.textContent = 'This is not the decrypted EBOOT of ULUS-10139 v1.00 (sha1 ' + hash + ').';
@@ -313,7 +359,8 @@
           } else if (e.data.result) { w.terminate(); res(e.data.result); }
           else { w.terminate(); rej(e.data.error); }
         };
-        w.postMessage({ eboot: bytes.buffer }, [bytes.buffer]);
+        var copy = bytes.slice();
+        w.postMessage({ eboot: copy.buffer }, [copy.buffer]);
       });
       await idb('readwrite', function (st) { return st.put(game, key); }).catch(function () {});
       // translations made by older recompiler versions are no longer needed
@@ -322,20 +369,13 @@
         if (typeof keys[i] === 'string' && keys[i].indexOf(hash + '-') === 0 && keys[i] !== key)
           await idb('readwrite', function (st) { return st.delete(keys[i]); }).catch(function () {});
     }
-    statusEl.textContent = 'game code ready (' + (game.code.length / 1048576).toFixed(1) + ' MB)';
     ready.game = true;
     tryStart();
   }
-  if (DYNAMIC) {
-    document.getElementById('eboot').addEventListener('change', function (e) {
-      var file = e.target.files[0];
-      if (file) file.arrayBuffer().then(function (b) { prepareGame(new Uint8Array(b)); });
-    });
-    // ?eboot=URL: local testing (tools/serve.py --eboot)
-    if (params.get('eboot'))
-      fetch(params.get('eboot')).then(function (r) { return r.arrayBuffer(); })
-        .then(function (b) { prepareGame(new Uint8Array(b)); });
-  }
+  // ?eboot=URL: local testing (tools/serve.py --eboot)
+  if (DYNAMIC && params.get('eboot'))
+    fetch(params.get('eboot')).then(function (r) { return r.arrayBuffer(); })
+      .then(function (b) { prepareGame(new Uint8Array(b)); });
 </script>
 {{{ SCRIPT }}}
 </body>
