@@ -973,6 +973,8 @@ static void tex_use(TexState *t, const TexEntry *e) {
     t->psy = (float)e->ph / (float)t->h;
 }
 
+static void glr_note_fb_access(const char *what, uint32_t lo, uint32_t hi);
+
 static void tex_cache_lookup(TexState *t) {
     uint32_t key_fmt = (uint32_t)t->fmt | (uint32_t)t->swizzle << 8 | (uint32_t)t->stride << 16;
     uint32_t key_size = (uint32_t)t->w | (uint32_t)t->h << 16;
@@ -989,6 +991,7 @@ static void tex_cache_lookup(TexState *t) {
         return;
     }
     uint32_t n = tex_bytes(t);
+    if (g_glr_active) glr_note_fb_access("texture", t->addr, t->addr + n);
     flush_if_rendering_to(t->addr, t->addr + n);  // the source may still be being drawn
     surf_resolve_range(t->addr, t->addr + n);     // or only exist at the internal resolution
     uint64_t h = (t->addr & 0x1FFFFFFF) + n <= GUEST_MEM_SIZE ? hash_bytes(host(t->addr), n) : 0;
@@ -1518,6 +1521,27 @@ static int g_glr_have_last;
 static uint32_t g_glr_fbs[16];  // framebuffers whose FBO was started from VRAM
 static int g_glr_nfbs;
 
+// The GPU renderer keeps framebuffers in FBOs: VRAM does not see what it
+// draws. Report (once per address) when the game reads a framebuffer region.
+static void glr_note_fb_access(const char *what, uint32_t lo, uint32_t hi) {
+    lo &= 0x0FFFFFFFu;
+    hi &= 0x0FFFFFFFu;
+    for (int k = 0; k < g_glr_nfbs; k++) {
+        uint32_t f = g_glr_fbs[k];
+        if (lo < f + 512 * 272 * 2 && f < hi) {
+            static uint32_t seen[64];
+            static int nseen;
+            uint32_t key = lo ^ (uint32_t)(uintptr_t)what;
+            for (int i = 0; i < nseen; i++)
+                if (seen[i] == key) return;
+            if (nseen < 64) seen[nseen++] = key;
+            fprintf(stderr, "glr: %s reads framebuffer %08x (range %08x-%08x): not drawn by the GPU renderer yet\n",
+                    what, f, lo, hi);
+            return;
+        }
+    }
+}
+
 static void glr_switched(void) {
     g_glr_have_last = 0;
     g_glr_nfbs = 0;  // FBOs restart from VRAM
@@ -1839,6 +1863,12 @@ void gpu_block_transfer(void) {
     g_flush_reason[2]++;
     raster_flush();
     const uint32_t *r = g_ge.cmd;
+    if (g_glr_active) {
+        uint32_t s0 = (r[GE_TRANSFERSRC] & 0xFFFFF0u) | ((r[GE_TRANSFERSRCW] & 0xFF0000u) << 8);
+        uint32_t d0 = (r[GE_TRANSFERDST] & 0xFFFFF0u) | ((r[GE_TRANSFERDSTW] & 0xFF0000u) << 8);
+        glr_note_fb_access("block transfer (source)", s0, s0 + 1);
+        glr_note_fb_access("block transfer (destination)", d0, d0 + 1);
+    }
     uint32_t src = (r[GE_TRANSFERSRC] & 0xFFFFF0u) | ((r[GE_TRANSFERSRCW] & 0xFF0000u) << 8);
     uint32_t dst = (r[GE_TRANSFERDST] & 0xFFFFF0u) | ((r[GE_TRANSFERDSTW] & 0xFF0000u) << 8);
     uint32_t sstride = r[GE_TRANSFERSRCW] & 0x7F8u, dstride = r[GE_TRANSFERDSTW] & 0x7F8u;
