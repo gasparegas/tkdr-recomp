@@ -132,6 +132,36 @@ static void frame(void) {
                 }
             }
         }
+        // GL_RECORD=start:seconds:dir: every presented frame in that guest time window (PPM), for videos/GIFs
+        const char *rec = getenv("GL_RECORD");
+        if (rec && g_glr_active) {
+            static double rs = -1, rd;
+            static char rdir[256];
+            static int rn;
+            if (rs < 0 && sscanf(rec, "%lf:%lf:%255s", &rs, &rd, rdir) != 3) rs = 1e30;
+            double tnow = (double)hle_time_us() / 1e6;
+            if (tnow >= rs && tnow < rs + rd) {
+                static uint32_t rb2[480 * 4 * 272 * 4];
+                int s2;
+                if (glr_read_fb(g_display.fb_addr, rb2, &s2)) {
+                    char path[512];
+                    snprintf(path, sizeof path, "%s/f_%05d.ppm", rdir, rn++);
+                    FILE *f = fopen(path, "wb");
+                    if (f) {
+                        static uint8_t rgb[480 * 4 * 272 * 4 * 3];
+                        int np = 480 * s2 * 272 * s2;
+                        for (int i = 0; i < np; i++) {
+                            rgb[i * 3] = (uint8_t)rb2[i];
+                            rgb[i * 3 + 1] = (uint8_t)(rb2[i] >> 8);
+                            rgb[i * 3 + 2] = (uint8_t)(rb2[i] >> 16);
+                        }
+                        fprintf(f, "P6\n%d %d\n255\n", 480 * s2, 272 * s2);
+                        fwrite(rgb, 3, (size_t)np, f);
+                        fclose(f);
+                    }
+                }
+            }
+        }
         goto stats;
     }
     int scale = gpu_scanout_scaled(g_display.fb_addr, g_display.stride, (uint32_t)g_display.format, pixels, 4);
@@ -241,7 +271,12 @@ void frontend_run(void) {
     const char *preview = getenv("UI_PREVIEW");
     if (preview) {
         void ui_set_open(int open);
-        SDL_Delay(1000 * (getenv("UI_PREVIEW_DELAY") ? (Uint32)atoi(getenv("UI_PREVIEW_DELAY")) : 5));
+        // keep running frames meanwhile: they also apply INPUT scripts
+        Uint32 until = SDL_GetTicks() + 1000 * (getenv("UI_PREVIEW_DELAY") ? (Uint32)atoi(getenv("UI_PREVIEW_DELAY")) : 5);
+        while (SDL_GetTicks() < until) {
+            frame();
+            SDL_Delay(16);
+        }
         if (!getenv("UI_PREVIEW_NOMENU")) ui_set_open(1);
         int pw, ph;  // UI_PREVIEW_SIZE=WxH: e.g. a phone held upright
         if (getenv("UI_PREVIEW_SIZE") && sscanf(getenv("UI_PREVIEW_SIZE"), "%dx%d", &pw, &ph) == 2)

@@ -2,6 +2,7 @@
 #include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "../../third_party/imgui/backends/imgui_impl_sdl2.h"
 #include "../../third_party/imgui/backends/imgui_impl_opengl3.h"
@@ -259,6 +260,15 @@ static void input_tab() {
     if (ImGui::Button("Save")) input_save();
 }
 
+// UI_PREVIEW_TAB=Video: open that tab (screenshots for the docs)
+static ImGuiTabItemFlags preview_tab(const char *name) {
+    static int done;
+    const char *want = getenv("UI_PREVIEW_TAB");
+    if (!want || done > 3 || strcmp(want, name)) return 0;
+    done++;
+    return ImGuiTabItemFlags_SetSelected;
+}
+
 extern "C" void ui_draw(void) {
     bool touch = !g_open && touch_visible();
     if (!g_open && !touch && !g_show_fps) return;
@@ -288,19 +298,19 @@ extern "C" void ui_draw(void) {
     if (g_open) {
     if (ImGui::Begin("tkdr settings (F1)", &g_open)) {
         if (ImGui::BeginTabBar("tabs")) {
-            if (ImGui::BeginTabItem("Input")) {
+            if (ImGui::BeginTabItem("Input", nullptr, preview_tab("Input"))) {
                 input_tab();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Video")) {
+            if (ImGui::BeginTabItem("Video", nullptr, preview_tab("Video"))) {
                 video_tab();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Textures")) {
+            if (ImGui::BeginTabItem("Textures", nullptr, preview_tab("Textures"))) {
                 textures_tab();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("About")) {
+            if (ImGui::BeginTabItem("About", nullptr, preview_tab("About"))) {
                 ImGui::TextWrapped("Static recompilation of Tekken: Dark Resurrection. Runs from your own dump only.");
                 ImGui::EndTabItem();
             }
