@@ -1,9 +1,16 @@
 # tkdr-recomp
 
 A static recompilation of *Tekken: Dark Resurrection* (PSP, ULUS-10139) to native
-code and WebAssembly. The game's MIPS executable is translated to C, then compiled
-for your machine or for the browser together with a runtime that reimplements the
-PSP's system libraries (threads, file system, graphics, audio, video, save data).
+code and WebAssembly. The game's MIPS executable is translated ahead of time (to C
+for native builds, or straight to WebAssembly **inside the player's browser**) and
+runs on a runtime that reimplements the PSP's system libraries (threads, file
+system, graphics, audio, video, save data). No emulation of the CPU.
+
+- 60 fps, internal resolution up to 4× (1920×1088), drawn by the GPU (OpenGL / WebGL 2)
+- in the browser with nothing to install: bring a zip (or ISO/CSO + EBOOT), play
+- any keyboard, gamepad, arcade stick or hitbox, with per-device bindings and SOCD
+  modes; on-screen touch controls on phones and tablets
+- PPSSPP-compatible texture packs (HD replacements), full screen
 
 ## This repository contains no game data
 
@@ -58,10 +65,16 @@ needs no game files and produces `build/web-host/`: `tkdr.html`, `tkdr.js`,
 folder is what can be put online (any static host that sends the COOP/COEP
 headers in `_headers`, e.g. Cloudflare Pages or Netlify).
 
-Each player picks their own ISO and their own decrypted EBOOT on the page. The
+Each player picks or drops their own files on the page: a `.zip` holding the
+disc image and the decrypted EBOOT, or the files themselves (ISO or CSO). The
 EBOOT is translated into WebAssembly **in their browser** (`web/recomp/`, a
-JavaScript port of the recompiler that writes wasm directly), once, then kept
-in that browser's storage. Files never leave the device.
+JavaScript port of the recompiler that writes wasm directly) in about a second,
+once. The disc is kept in that browser's storage as a CSO with 256 KB blocks
+(1669 → 1109 MB) and read back block by block; next time a single *Play* is
+enough. Files never leave the device.
+
+`tools/make_deploy.sh [--push]` puts this build on a `deploy` branch with a
+`render.yaml` (Render static site, `PICK_FILES=true`).
 
 Never host `build/web/` or `build/native/`: those contain the translated game.
 
@@ -144,8 +157,10 @@ under the same name PPSSPP would give it. Edit a PNG, move it up into
 ## Status
 
 Boots, plays movies with sound, menus, save/load, and full matches against the CPU
-at 60 fps (native and in the browser on a recent desktop). Missing: SAS reverb,
-ad-hoc multiplayer.
+at 60 fps up to 4× (native, and in the browser on a recent desktop). Tested from
+boot to Quick Battle; other modes are less explored. Missing: SAS reverb, ad-hoc
+multiplayer, framebuffer readback in the GPU renderer (not used by the scenes
+tested so far).
 
 ## How it works
 
@@ -153,18 +168,26 @@ ad-hoc multiplayer.
   instructions, finds functions (`.eh_frame`, call targets, code pointers, jump
   tables, cross-jump fragments) and emits one C function per guest function.
 - `runtime/`: guest memory, a PSP-like single-core priority scheduler on host
-  threads, HLE of the system libraries, a VFPU interpreter, a multi-threaded
-  software rasterizer for the GE, SAS/ATRAC3+/H.264 audio and video, and an SDL2
-  frontend that also builds with Emscripten.
+  threads, HLE of the system libraries, a VFPU interpreter, the GE (vertex
+  pipeline on the CPU, then the GPU renderer `gpu/glr.c` or a multi-threaded
+  software rasterizer), SAS/ATRAC3+/H.264 audio and video, input and touch
+  (`ui/`), and an SDL2 frontend that also builds with Emscripten.
 - `web/recomp/`: the same recompiler in JavaScript, emitting WebAssembly
   directly, for the hostable browser build (`RECOMP_DYNAMIC`).
-- `tools/`: build helpers, ISO/CSO tools and a local web server.
+- `web/disc.mjs`: zip, ISO and CSO in the browser (read, unpack, compress, keep).
+- `tools/`: build helpers, ISO/CSO tools, a local web server, deploy helpers.
 
 Debugging aids are described in `NOTES.md`.
 
+## Contributing
+
+Welcome. Read `CONTRIBUTING.md` first: the one hard rule is that nothing derived
+from a game ever enters the repository.
+
 ## Licenses
 
-Third-party code keeps its own license:
+The project's own code is under the MIT License (`LICENSE`). Third-party code
+keeps its own license:
 
 - `third_party/at3_standalone/`: ATRAC3/ATRAC3+ decoders from FFmpeg, in the
   standalone form extracted by the PPSSPP project, LGPL-2.1-or-later.
@@ -173,5 +196,9 @@ Third-party code keeps its own license:
 - FFmpeg (H.264 decoder), downloaded and built by `tools/build_ffmpeg.sh`,
   LGPL-2.1-or-later.
 
+Builds link the LGPL decoders statically; their source is in this repository
+(and FFmpeg's is downloaded by the build script), as the LGPL requires.
+
 PPSSPP's source served as documentation of PSP behaviour; no PPSSPP code is
-included apart from the decoder extraction above.
+included apart from the decoder extraction above. `recomp/nids.json` lists
+the public names of the PSP system functions the game imports.
