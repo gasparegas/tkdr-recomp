@@ -26,13 +26,13 @@ typedef struct {
     int is_dir;
 } IsoEntry;
 
+uint64_t g_iso_read_bytes, g_iso_read_calls;  // stats (FPS=1, native)
 #ifdef __EMSCRIPTEN__
 // In the browser the ISO is a File held by the main thread (see web/shell.html);
 // reads go through a block cache backed by web_read() in web.c.
 int web_iso_read(uint64_t off, void *buf, size_t n);
 static int iso_read(uint64_t off, void *buf, size_t n) { return web_iso_read(off, buf, n); }
 #else
-uint64_t g_iso_read_bytes, g_iso_read_calls;  // stats (FPS=1)
 static int iso_read(uint64_t off, void *buf, size_t n) {
     g_iso_read_bytes += n;
     g_iso_read_calls++;
