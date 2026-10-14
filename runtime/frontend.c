@@ -70,6 +70,61 @@ void script_tick(void);
 
 int g_fps_game, g_fps_display;  // last second, for the F2 overlay
 
+#ifndef __EMSCRIPTEN__
+// GL_RECORD_MP4=start:seconds:file.mp4: the whole window (game and overlays) as shown, encoded by ffmpeg
+// with the hardware encoder. Read back through a ring of pixel buffers, a few frames late, so the game
+// keeps its speed while recording.
+static void record_mp4(int ww, int wh) {
+    enum { RING = 4 };
+    static double vs = -1, vd;
+    static char vfile[256];
+    static FILE *vp;
+    static int vw, vh, n, done;
+    static GLuint pbo[RING];
+    const char *rec = getenv("GL_RECORD_MP4");
+    if (!rec || done) return;
+    if (vs < 0 && sscanf(rec, "%lf:%lf:%255s", &vs, &vd, vfile) != 3) vs = 1e30;
+    double tnow = (double)hle_time_us() / 1e6;
+    if (tnow < vs) return;
+    size_t bytes = (size_t)vw * vh * 4;
+    if (!vp) {
+        char cmd[512];
+        vw = ww, vh = wh, bytes = (size_t)vw * vh * 4;
+        snprintf(cmd, sizeof cmd, "ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d -r 60 -i - "
+                 "-vf vflip -c:v h264_videotoolbox -b:v 30M -pix_fmt yuv420p '%s'", vw, vh, vfile);
+        vp = popen(cmd, "w");
+        if (!vp) { done = 1; return; }
+        glGenBuffers(RING, pbo);
+        for (int i = 0; i < RING; i++) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[i]);
+            glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)bytes, NULL, GL_STREAM_READ);
+        }
+    }
+    int recording = tnow < vs + vd && ww == vw && wh == vh;
+    if (recording) {  // this frame into the ring
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[n % RING]);
+        glReadPixels(0, 0, vw, vh, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+        n++;
+    }
+    // hand ffmpeg the frames old enough to be ready (all of them once the window is over)
+    static int sent;
+    while (sent < n && (n - sent >= RING || !recording)) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[sent % RING]);
+        void *px = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)bytes, GL_MAP_READ_BIT);
+        if (px) fwrite(px, 1, bytes, vp);
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        sent++;
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    if (!recording) {
+        pclose(vp);
+        glDeleteBuffers(RING, pbo);
+        done = 1;
+        fprintf(stderr, "recorded %s (%d frames)\n", vfile, n);
+    }
+}
+#endif
+
 static void frame(void) {
     static uint32_t pixels[480 * 4 * 272 * 4];
     script_tick();
@@ -112,6 +167,9 @@ static void frame(void) {
         }
         glViewport(0, 0, ww, wh);
         ui_draw();
+#ifndef __EMSCRIPTEN__
+        record_mp4(ww, wh);
+#endif
         SDL_GL_SwapWindow(win);
         // GL_SHOTS=dir: save what the GPU renderer drew for the displayed framebuffer every guest second
         const char *shots = getenv("GL_SHOTS");

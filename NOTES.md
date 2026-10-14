@@ -59,6 +59,9 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
 | `GE_REPLAY=file` | no game: draw a capture `GE_REPLAY_ITERS` times (default 20), print ms/frame, save `GE_REPLAY_OUT=out.ppm`; with `RENDER_SCALE`, `RASTER_THREADS` |
 | `HIDDEN_WINDOW=1` | GPU renderer without showing the window (tests) |
 | `GL_SHOTS=dir` | save what the GPU renderer drew for the displayed framebuffer every guest second (PPM) |
+| `GL_RECORD=start:seconds:dir` | every presented frame of the GPU renderer in that guest time window (PPM) |
+| `GL_RECORD_MP4=start:seconds:file.mp4` | the whole window as shown (overlays too) in that guest time window, to an mp4 through ffmpeg (hardware encoder) without slowing the game |
+| `SHOW_FPS=1` | start with the fps overlay (F2) on |
 | `NO_GL=1` | no OpenGL: software renderer, presented with SDL_Renderer |
 | `FPS=1` | (windowed) print the fps line every second |
 | `TOUCH=1` | show the on-screen controls from the start (web: `?touch`) |

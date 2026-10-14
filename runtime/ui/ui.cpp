@@ -26,6 +26,7 @@ extern "C" {
 void ui_init(SDL_Window *win, SDL_Renderer *ren, int gles) {
     g_ren = ren;
     g_win = win;
+    if (getenv("SHOW_FPS")) g_show_fps = true;  // F2 from the start (recordings)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
@@ -284,9 +285,11 @@ extern "C" void ui_draw(void) {
         char t[48];
         snprintf(t, sizeof t, "%d fps  (display %d)", g_fps_game, g_fps_display);
         ImDrawList *dl = ImGui::GetForegroundDrawList();
-        ImVec2 sz = ImGui::CalcTextSize(t);
-        dl->AddRectFilled(ImVec2(6, 6), ImVec2(14 + sz.x, 12 + sz.y), IM_COL32(0, 0, 0, 160), 4.f);
-        dl->AddText(ImVec2(10, 9), g_fps_game >= 55 ? IM_COL32(120, 255, 120, 255) : IM_COL32(255, 200, 80, 255), t);
+        float fs = ImGui::GetFontSize() * 1.5f;  // readable over the game, also in recordings
+        ImVec2 sz = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.f, t);
+        dl->AddRectFilled(ImVec2(6, 6), ImVec2(16 + sz.x, 14 + sz.y), IM_COL32(0, 0, 0, 170), 5.f);
+        dl->AddText(ImGui::GetFont(), fs, ImVec2(11, 10),
+                    g_fps_game >= 55 ? IM_COL32(120, 255, 120, 255) : IM_COL32(255, 200, 80, 255), t);
     }
     // fits small screens (phones) too
     ImVec2 ds = ImGui::GetIO().DisplaySize;
