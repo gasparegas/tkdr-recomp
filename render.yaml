@@ -1,0 +1,17 @@
+# Render static site: the hostable build (players bring their own files)
+services:
+  - type: web
+    name: tkdr
+    runtime: static
+    buildCommand: python3 tools/web_config.py site
+    staticPublishPath: ./site
+    envVars:
+      - key: PICK_FILES
+        value: "true"
+    headers:
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Cross-Origin-Embedder-Policy
+        value: require-corp
