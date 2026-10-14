@@ -21,6 +21,13 @@
   #server { padding: 20px 24px; border: 1px solid #444; border-radius: 8px; text-align: center; max-width: 520px; }
   #server button { font: 600 18px system-ui, sans-serif; padding: 10px 28px; border-radius: 8px; border: 0;
                    background: #e8e8ea; color: #111; cursor: pointer; }
+  #loading { display: none; padding: 22px 26px; border: 1px solid #444; border-radius: 8px; text-align: center;
+             width: min(520px, 100%); box-sizing: border-box; }
+  #loading h2 { margin: 0 0 6px; font: 700 20px system-ui, sans-serif; color: #fff; }
+  #load-pct { font: 800 56px/1.1 system-ui, sans-serif; color: #fff; font-variant-numeric: tabular-nums; margin: 10px 0; }
+  #load-bar { height: 12px; border-radius: 6px; background: #2a2a2e; overflow: hidden; }
+  #load-bar div { height: 100%; width: 0; background: linear-gradient(90deg, #ff5e5b, #ffb15b); transition: width .3s ease; }
+  #loading p { margin: 12px 0 0; color: #b0b0b6; font-size: 14px; }
   #resume { display: none; padding: 20px 24px; border: 1px solid #444; border-radius: 8px; text-align: center; max-width: 520px; }
   #resume button { font: 600 18px system-ui, sans-serif; padding: 10px 28px; border-radius: 8px; border: 0;
                    background: #e8e8ea; color: #111; cursor: pointer; }
@@ -73,8 +80,15 @@
   <p><a href="#" id="forget">Forget the saved game files</a></p>
 </div>
 <div id="server" style="display:none">
-  <p>The game is loaded from this site's own server, then kept in this browser.</p>
+  <p>The first time, the game (about 1 GB) is downloaded from this site's own server and kept in this browser:
+    after that it starts right away, without downloading it again.</p>
   <button id="server-play">▶ Play</button>
+</div>
+<div id="loading">
+  <h2 id="load-title"></h2>
+  <div id="load-pct">0%</div>
+  <div id="load-bar"><div></div></div>
+  <p id="load-note"></p>
 </div>
 <div id="pick">
   <p>Bring your own dump of the game (ULUS-10139). Files are read on this device and never uploaded.</p>
@@ -243,10 +257,25 @@
     if (navigator.storage.persist) navigator.storage.persist();
     await idb('readwrite', function (st) { return st.delete('disc-meta'); });
     var m = await lib();
+    var box = document.getElementById('loading'), shown = false;
     await m.storeDisc(stream, total, DISC_FILE, function (f) {
       window.tkKeepProgress = f;
-      if (!started) statusEl.textContent = label + ' ' + Math.round(f * 100) + '%…';
-    });
+      if (started) { box.style.display = 'none'; return; }
+      if (!shown) {  // the big progress box, until the game starts
+        shown = true;
+        document.getElementById('load-title').textContent = label;
+        document.getElementById('load-note').textContent = serverMode()
+          ? 'First time only: the game is downloaded once and kept in this browser, so next time it starts right ' +
+            'away. It stays until you clear this site\'s data (cookies and site data) in the browser settings.'
+          : 'First time only: the game is kept in this browser, so next time you just press Play. It stays until ' +
+            'you clear this site\'s data (cookies and site data) in the browser settings.';
+        box.style.display = 'block';
+        statusEl.textContent = '';
+      }
+      var pct = Math.floor(f * 100) + '%';
+      document.getElementById('load-pct').textContent = pct;
+      box.querySelector('#load-bar div').style.width = pct;
+    }).finally(function () { box.style.display = 'none'; });
     var file = await keptFile();
     await idb('readwrite', function (st) {
       return st.put({ name: name, size: file.size, original: total, when: Date.now() }, 'disc-meta');
@@ -342,7 +371,7 @@
       if (d.blob) {  // a disc image: play it now, keep a compressed copy meanwhile
         useDisc(await m.openDisc(d.blob));
         if (canKeep)
-          keepDisc(d.blob.stream(), d.blob.size, 'keeping the game in this browser', d.blob.name).then(function () {
+          keepDisc(d.blob.stream(), d.blob.size, 'Keeping the game in this browser', d.blob.name).then(function () {
             statusEl.textContent = 'Game kept in this browser: next time just press Play.';
           }, function (e) { console.warn('could not keep the game files: ' + e); });
         return;
@@ -350,7 +379,7 @@
       // a zip: the disc inside has to be unpacked before it can be read at random places
       if (!canKeep) throw new Error('this browser cannot unpack the zip here: pick the ISO or CSO itself');
       var file = await keepDisc(await m.entryStream(d.zip, d.entry), d.entry.usize,
-                                serverMode() ? 'loading the game from the server' : 'unpacking and compressing the game',
+                                serverMode() ? 'Downloading the game' : 'Unpacking the game',
                                 d.entry.name.split('/').pop());
       useDisc(await m.openDisc(file));
     } catch (err) {
