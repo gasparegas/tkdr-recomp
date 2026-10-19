@@ -290,6 +290,7 @@ static const char *k_fs =
     "    if (!pass) discard;\n"
     "  }\n"
     "  if (u_srcfix != 0) c.rgb *= u_fixa;  // fixed source blend factor\n"
+    "  gl_FragDepth = floor(gl_FragCoord.z * 65535.0) / 65535.0;  // the GE's 16-bit depth: coplanar layers tie as on the PSP\n"
     "  o_col = c;\n"
     "}\n";
 
