@@ -6,7 +6,9 @@
 // whoever runs guest code; everyone else sleeps on their own condvar.
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "../func_table.h"
@@ -193,6 +195,67 @@ static int g_in_intr;
 void hle_intr_enter(void) { g_in_intr++; }
 void hle_intr_leave(void) { g_in_intr--; }
 
+// Idling until guest time `wake`. Timed waits can overshoot by a lot on some hosts (Windows rounds them
+// to its timer tick, up to 15.6 ms: a missed vblank each time, the game in slow motion), so the overshoot
+// is measured (its 90th percentile), the wait ends that much early and the rest is spent polling with the lock released.
+// Where timed waits are precise (macOS, Linux) the margin stays near zero. Events from other host
+// threads (a GE list done) cut the wait short through sched_wake_idle().
+static Thread *g_idler;
+static int g_wake_flag;        // set by sched_wake_idle(), read without g_big while polling
+static double g_overshoot_us;  // 90th percentile of the last timed waits' overshoot
+static uint32_t g_over_ring[32], g_over_n;
+
+static void note_overshoot(uint32_t us) {
+    g_over_ring[g_over_n++ % 32] = us < 20000 ? us : 20000;
+    uint32_t s[32];
+    int n = g_over_n < 32 ? (int)g_over_n : 32;
+    memcpy(s, g_over_ring, sizeof s);
+    for (int i = 1; i < n; i++)  // insertion sort, 32 entries
+        for (int j = i; j > 0 && s[j - 1] > s[j]; j--) {
+            uint32_t t = s[j];
+            s[j] = s[j - 1];
+            s[j - 1] = t;
+        }
+    g_overshoot_us = s[(n * 9) / 10 < n ? (n * 9) / 10 : n - 1];  // occasional spikes don't count
+}
+
+static void idle_until(Thread *self, uint64_t wake, uint64_t now) {
+    if (__atomic_exchange_n(&g_wake_flag, 0, __ATOMIC_ACQ_REL)) return;
+    double margin = g_overshoot_us + 300.0;
+    if ((double)(wake - now) <= margin) {  // poll the clock without the lock, so other threads get in
+        pthread_mutex_unlock(&g_big);
+        while (hle_time_us() < wake && !__atomic_load_n(&g_wake_flag, __ATOMIC_ACQUIRE)) sched_yield();
+        __atomic_store_n(&g_wake_flag, 0, __ATOMIC_RELEASE);
+        pthread_mutex_lock(&g_big);
+        return;
+    }
+    uint64_t target = wake - (uint64_t)margin;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t wns = (uint64_t)((double)(target - now) * 1000.0 / g_time_scale);
+    static long tick_ns = -1;  // TIMER_TICK_US=15600: round timed waits up like Windows does (testing)
+    if (tick_ns < 0) tick_ns = getenv("TIMER_TICK_US") ? atol(getenv("TIMER_TICK_US")) * 1000 : 0;
+    if (tick_ns > 0) wns = (wns + (uint64_t)tick_ns - 1) / (uint64_t)tick_ns * (uint64_t)tick_ns;
+    uint64_t ns = (uint64_t)ts.tv_nsec + wns;
+    ts.tv_sec += (time_t)(ns / 1000000000u);
+    ts.tv_nsec = (long)(ns % 1000000000u);
+    g_idler = self;
+    int r = pthread_cond_timedwait(&self->cv, &g_big, &ts);
+    g_idler = NULL;
+    if (r == ETIMEDOUT) {
+        uint64_t late = hle_time_us();
+        note_overshoot(late > target ? (uint32_t)(late - target) : 0);
+    }
+}
+
+// From another host thread (not holding g_big): something a waiting guest thread may care about happened.
+void sched_wake_idle(void) {
+    __atomic_store_n(&g_wake_flag, 1, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&g_big);
+    if (g_idler) pthread_cond_signal(&g_idler->cv);
+    pthread_mutex_unlock(&g_big);
+}
+
 // Give the baton to the best ready thread and block until it comes back.
 // Called with g_big held by `self` (which may be waiting, dormant or dead).
 static void reschedule(Thread *self) {
@@ -228,9 +291,10 @@ static void reschedule(Thread *self) {
         FOR_EACH_THREAD(t) {
             if (t->status == ST_WAITING) any = 1;
             if (t->status == ST_WAITING && t->deadline && t->deadline < wake) wake = t->deadline;
-            if (t->status == ST_WAITING && t->wait_type == W_GPU && now + 500 < wake) wake = now + 500;
+            if (t->status == ST_WAITING && t->wait_type == W_GPU && now + 4000 < wake) wake = now + 4000;
         }
-        if (gpu_busy(-1) && now + 500 < wake) wake = now + 500;  // poll the GPU thread
+        // the GPU thread wakes us when a list is done (sched_wake_idle); this is only a safety net
+        if (gpu_busy(-1) && now + 4000 < wake) wake = now + 4000;
         if (!any) {
             fprintf(stderr, "all threads finished or deadlocked\n");
             pthread_cond_broadcast(&g_all_done);
@@ -238,12 +302,7 @@ static void reschedule(Thread *self) {
         }
         if (wake > now) {
             g_idle_us += wake - now;  // approximate (stats)
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            uint64_t ns = (uint64_t)ts.tv_nsec + (uint64_t)((double)(wake - now) * 1000.0 / g_time_scale);
-            ts.tv_sec += (time_t)(ns / 1000000000u);
-            ts.tv_nsec = (long)(ns % 1000000000u);
-            pthread_cond_timedwait(&self->cv, &g_big, &ts);
+            idle_until(self, wake, now);
         }
     }
 }

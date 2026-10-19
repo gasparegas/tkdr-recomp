@@ -62,6 +62,7 @@ sceNetAdhoc* (31 total, ad-hoc multiplayer), sceGe_user (6), sceAtrac3plus (9).
 | `GL_RECORD=start:seconds:dir` | every presented frame of the GPU renderer in that guest time window (PPM) |
 | `GL_RECORD_MP4=start:seconds:file.mp4` | the whole window as shown (overlays too) in that guest time window, to an mp4 through ffmpeg (hardware encoder) without slowing the game |
 | `SHOW_FPS=1` | start with the fps overlay (F2) on |
+| `TIMER_TICK_US=15600` | round the scheduler's timed waits up to that tick, as Windows does (the game must still run at full speed) |
 | `NO_GL=1` | no OpenGL: software renderer, presented with SDL_Renderer |
 | `FPS=1` | (windowed) print the fps line every second |
 | `TOUCH=1` | show the on-screen controls from the start (web: `?touch`) |

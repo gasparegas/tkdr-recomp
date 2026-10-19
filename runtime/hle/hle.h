@@ -48,6 +48,7 @@ void sysmem_init(uint32_t free_start, uint32_t free_end);
 // thread.c
 void sched_boot(Ctx *boot_ctx);
 void sched_check_events(void);  // timeouts/vblank; may switch threads
+void sched_wake_idle(void);     // from host threads: an event a guest thread may wait for
 Ctx *sched_current_ctx(void);
 void thread_delay(Ctx *c, uint64_t usec, int allow_cb);
 void hle_wait_vblank(Ctx *c, int allow_cb);

@@ -55,6 +55,7 @@ static void raise_interrupt(uint32_t fn, uint32_t a0, uint32_t a1) {
         g_intr_n++;
     }
     pthread_mutex_unlock(&g_lock);
+    sched_wake_idle();  // the callbacks run on a guest thread
 }
 
 void hle_intr_enter(void);
@@ -357,7 +358,12 @@ static void *gpu_thread(void *arg) {
             l->done = 1;
             l->queued = 0;
         }
-        pthread_cond_broadcast(&g_work);  // wakes nothing on the guest side; see gpu_busy
+        pthread_cond_broadcast(&g_work);
+        if (done) {  // a guest thread may be waiting for it (sceGeDrawSync, sceGeListSync)
+            pthread_mutex_unlock(&g_lock);
+            sched_wake_idle();
+            pthread_mutex_lock(&g_lock);
+        }
     }
     return NULL;
 }
