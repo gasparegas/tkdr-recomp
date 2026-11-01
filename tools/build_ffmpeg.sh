@@ -7,7 +7,14 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DIR=$ROOT/third_party/ffmpeg
 mkdir -p "$DIR"
 cd "$DIR"
-[ -d ffmpeg-$VER ] || curl -fsSL --retry 5 --retry-all-errors https://ffmpeg.org/releases/ffmpeg-$VER.tar.xz | tar xJ
+if [ ! -d ffmpeg-$VER ]; then
+  curl -fsSL --retry 2 --retry-all-errors --connect-timeout 20 https://ffmpeg.org/releases/ffmpeg-$VER.tar.xz | tar xJ || {
+    echo "ffmpeg.org unavailable, using the GitHub mirror" >&2
+    rm -rf ffmpeg-$VER && mkdir ffmpeg-$VER
+    curl -fsSL --retry 5 --retry-all-errors https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n$VER.tar.gz |
+      tar xz --strip-components=1 -C ffmpeg-$VER
+  }
+fi
 COMMON="--disable-everything --enable-decoder=h264 --enable-parser=h264 --disable-programs --disable-doc
   --disable-avdevice --disable-avformat --disable-avfilter --disable-swresample --disable-swscale
   --disable-network --disable-iconv --disable-zlib --disable-bzlib --disable-lzma --disable-securetransport
