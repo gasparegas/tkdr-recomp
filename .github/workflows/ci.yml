@@ -1,0 +1,79 @@
+# Nothing here ever sees the game: the only build is the hostable web page,
+# which recompiles each player's own files on their device.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: No game data in the repository
+        run: |
+          if git ls-files | grep -iE '\.(iso|cso|pbp|prx|elf|bin|gecap)$'; then
+            echo "::error::game-like files are tracked (see CONTRIBUTING.md)"
+            exit 1
+          fi
+      - name: Python
+        run: python3 -m compileall -q recomp tools
+      - name: JavaScript modules
+        run: for f in web/*.mjs web/recomp/*.mjs; do node --check "$f"; done
+      - name: Shell scripts
+        run: for f in tools/*.sh; do sh -n "$f"; done
+
+  web-host:
+    needs: checks
+    runs-on: ubuntu-latest
+    env:
+      EMSCRIPTEN: 6.0.12
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm ninja-build
+      - uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN }}
+      - uses: actions/cache@v6
+        with:
+          path: third_party/ffmpeg
+          key: ffmpeg-${{ env.EMSCRIPTEN }}-${{ hashFiles('tools/build_ffmpeg.sh') }}
+      - name: Build
+        run: tools/build.sh --web-host
+      - name: Package
+        run: |
+          mkdir dist
+          cp build/web-host/tkdr.html dist/index.html
+          cp build/web-host/{tkdr.html,tkdr.js,tkdr.wasm,disc.mjs,_headers} LICENSE dist/
+          cp -R build/web-host/recomp dist/recomp
+          python3 tools/web_config.py dist
+          if find dist -type f | grep -iE '\.(iso|cso|zip|bin|elf|data)$'; then
+            echo "::error::game-like files in the package"
+            exit 1
+          fi
+          (cd dist && zip -qr ../tkdr-web-host.zip .)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tkdr-web-host
+          path: tkdr-web-host.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: web-host
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: tkdr-web-host
+      - name: Publish
+        run: gh release create "$GITHUB_REF_NAME" tkdr-web-host.zip --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

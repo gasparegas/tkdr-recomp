@@ -1,5 +1,7 @@
 # tkdr-recomp
 
+[![CI](https://github.com/gasparegas/tkdr-recomp/actions/workflows/ci.yml/badge.svg)](https://github.com/gasparegas/tkdr-recomp/actions/workflows/ci.yml)
+
 *Tekken: Dark Resurrection* (PSP) recompiled to run natively and in the browser,
 at 60 fps and up to 4× resolution, with whatever controller you have.
 
@@ -98,7 +100,9 @@ tools/build.sh --web-host
 
 needs no game files and produces `build/web-host/`, the page with the in-browser
 recompiler: **nothing from the game is in it**, so this folder is what can be put
-online (any static host sending the COOP/COEP headers in `_headers`).
+online (any static host sending the COOP/COEP headers in `_headers`). Each
+[release](https://github.com/gasparegas/tkdr-recomp/releases) has it ready as
+`tkdr-web-host.zip`.
 `tools/make_deploy.sh [--push]` puts it on a `deploy` branch with a `render.yaml`
 for Render. Never host `build/web/` or `build/native/`: those contain the
 translated game.
