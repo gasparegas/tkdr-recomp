@@ -139,6 +139,10 @@ less explored. Missing: SAS reverb, ad-hoc multiplayer.
 Welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: the one hard rule is that
 nothing derived from a game ever enters the repository.
 
+Found a bug? Open an [issue](https://github.com/gasparegas/tkdr-recomp/issues/new/choose)
+with your setup and the numbers from the fps overlay (F2). Questions and ideas go in
+[Discussions](https://github.com/gasparegas/tkdr-recomp/discussions).
+
 ## Licenses
 
 The project's code is MIT ([LICENSE](LICENSE)). Third-party code keeps its own:
